@@ -33,6 +33,7 @@ import ifcopenshell.util.attribute
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import ifcopenshell.util.representation
+import ifcopenshell.util.structural
 import ifcopenshell.util.unit
 import numpy as np
 
@@ -449,12 +450,8 @@ class Structural(bonsai.core.tool.Structural):
         for activity in tool.Ifc.get().get_inverse(load):
             if not activity.is_a("IfcStructuralActivity") or activity.GlobalOrLocal == "LOCAL_COORDS":
                 continue
-            item = connects[0].RelatingElement if (connects := activity.AssignedToStructuralItem) else None
-            for rel in getattr(item, "HasAssignments", None) or []:
-                model = rel.RelatingGroup if rel.is_a("IfcRelAssignsToGroup") else None
-                if model and model.is_a("IfcStructuralAnalysisModel") and model.SharedPlacement:
-                    rotation = ifcopenshell.util.placement.get_placement(model.SharedPlacement)[:3, :3]
-                    return None if np.allclose(rotation, np.eye(3)) else rotation
+            rotation = ifcopenshell.util.structural.get_global_axes(activity)
+            return None if np.allclose(rotation, np.eye(3)) else rotation
         return None
 
     @classmethod
@@ -495,15 +492,8 @@ class Structural(bonsai.core.tool.Structural):
         cls, activity: ifcopenshell.entity_instance
     ) -> Union[ifcopenshell.entity_instance, None]:
         """The load case an applied load is in, directly or through a load group within it"""
-        for rel in activity.HasAssignments:
-            if not (rel.is_a("IfcRelAssignsToGroup") and (group := rel.RelatingGroup)):
-                continue
-            if cls.is_load_case(group):
-                return group
-            for parent in group.HasAssignments if group.is_a("IfcStructuralLoadGroup") else []:
-                if parent.is_a("IfcRelAssignsToGroup") and cls.is_load_case(parent.RelatingGroup):
-                    return parent.RelatingGroup
-        return None
+        cases = ifcopenshell.util.structural.get_activity_load_cases(activity)
+        return cases[0] if cases else None
 
     @classmethod
     def get_resultant(
