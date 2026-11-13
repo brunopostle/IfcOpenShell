@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import TYPE_CHECKING, Any, Union
 
 import bpy
@@ -32,6 +33,7 @@ from bonsai.bim.module.structural.data import (
     StructuralAnalysisModelsData,
     StructuralBoundaryConditionsData,
     StructuralConnectionData,
+    StructuralItemLoadsData,
     StructuralLoadCasesData,
     StructuralLoadsData,
     StructuralMemberData,
@@ -118,7 +120,7 @@ class BIM_PT_structural_boundary_conditions(Panel):
     bl_region_type = "WINDOW"
     bl_context = "object"
     bl_order = 1
-    bl_parent_id = "BIM_PT_tab_misc"
+    bl_parent_id = "BIM_PT_tab_object_structural"
 
     @classmethod
     def poll(cls, context):
@@ -157,7 +159,7 @@ class BIM_PT_connected_structural_members(Panel):
     bl_region_type = "WINDOW"
     bl_context = "object"
     bl_order = 1
-    bl_parent_id = "BIM_PT_tab_misc"
+    bl_parent_id = "BIM_PT_tab_object_structural"
 
     @classmethod
     def poll(cls, context):
@@ -212,7 +214,7 @@ class BIM_PT_structural_member(Panel):
     bl_region_type = "WINDOW"
     bl_context = "object"
     bl_order = 1
-    bl_parent_id = "BIM_PT_tab_misc"
+    bl_parent_id = "BIM_PT_tab_object_structural"
 
     @classmethod
     def poll(cls, context):
@@ -249,6 +251,134 @@ class BIM_PT_structural_member(Panel):
             row.label(text="TODO")
 
 
+def draw_chain_order_buttons(layout: bpy.types.UILayout, chain: list[int], i: int, load_case: int) -> None:
+    """Buttons moving the i-th of an item's applied loads in a load case along its tip-to-tail chain"""
+    if len(chain) < 2:
+        return
+    for offset, icon in ((-1, "TRIA_UP"), (1, "TRIA_DOWN")):
+        sub = layout.row(align=True)
+        sub.enabled = 0 <= i + offset < len(chain)
+        op = sub.operator("bim.move_structural_activity", text="", icon=icon)
+        op.activity, op.load_case, op.offset = chain[i], load_case, offset
+
+
+def draw_chain_reverse_button(layout: bpy.types.UILayout, chain: list[int], item: int, load_case: int) -> None:
+    if len(chain) > 1:
+        op = layout.operator("bim.reverse_structural_activities", text="", icon="ARROW_LEFTRIGHT", emboss=False)
+        op.item, op.load_case = item, load_case
+
+
+def get_load_case_eye(load_case: int) -> str:
+    """An open eye for the load case whose loads are shown, closed for the others"""
+    props = tool.Structural.get_structural_props()
+    shown = props.show_loads and props.load_group_to_show == str(load_case)
+    return "HIDE_OFF" if shown else "HIDE_ON"
+
+
+class BIM_PT_structural_item_models(Panel):
+    bl_label = "Analysis Models"
+    bl_idname = "BIM_PT_structural_item_models"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+    bl_order = 1
+    bl_parent_id = "BIM_PT_tab_object_structural"
+
+    @classmethod
+    def poll(cls, context):
+        if not (obj := context.active_object) or not tool.Ifc.get():
+            return False
+        element = tool.Ifc.get_entity(obj)
+        return bool(element and element.is_a("IfcStructuralItem"))
+
+    def draw(self, context):
+        if not StructuralAnalysisModelsData.is_loaded:
+            StructuralAnalysisModelsData.load()
+        data = StructuralAnalysisModelsData.data
+        if not data["models"]:
+            self.layout.label(text="No analysis models", icon="INFO")
+        current = data["current_model"]["id"] if data["current_model"] else None
+        for model in data["models"]:
+            row = self.layout.row(align=True)
+            # Ticking applies to every selected structural item, as the assign operators do.
+            if model["id"] in data["active_model_ids"]:
+                op = row.operator("bim.unassign_structural_analysis_model", text="", icon="CHECKBOX_HLT", emboss=False)
+            else:
+                op = row.operator("bim.assign_structural_analysis_model", text="", icon="CHECKBOX_DEHLT", emboss=False)
+            op.structural_analysis_model = model["id"]
+            row.label(text=model["name"] + (" (current)" if model["id"] == current else ""))
+
+
+class BIM_PT_structural_item_loads(Panel):
+    bl_label = "Applied Loads"
+    bl_idname = "BIM_PT_structural_item_loads"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+    bl_order = 1
+    bl_parent_id = "BIM_PT_tab_object_structural"
+
+    @classmethod
+    def poll(cls, context):
+        if not (obj := context.active_object) or not tool.Ifc.get():
+            return False
+        element = tool.Ifc.get_entity(obj)
+        return bool(element and element.is_a("IfcStructuralItem"))
+
+    def draw_header(self, context):
+        self.layout.operator("bim.apply_structural_load", text="", icon="ADD")
+
+    def draw(self, context):
+        if not StructuralItemLoadsData.is_loaded:
+            StructuralItemLoadsData.load()
+        layout = self.layout
+        load_cases = StructuralItemLoadsData.data["load_cases"]
+        if not load_cases:
+            layout.label(text="No loads applied", icon="INFO")
+        for load_case in load_cases:
+            box = layout.box()
+            row = box.row(align=True)
+            row.label(text=load_case["name"], icon="CON_CLAMPTO")
+            if load_case["resultant"]:
+                row.label(text=load_case["resultant"])
+            if load_case["resultant_of"]:
+                # Its arrow can be clicked too, but a resultant of forces in equilibrium has none to click.
+                row.operator("bim.edit_structural_resultant", text="", icon="GREASEPENCIL").activities = load_case[
+                    "resultant_of"
+                ]
+            # The order they are drawn tip to tail.
+            chain = [load["activity"] for load in load_case["loads"]]
+            draw_chain_reverse_button(row, chain, tool.Ifc.get_entity(context.active_object).id(), load_case["id"])
+            if load_case["id"]:
+                row.operator(
+                    "bim.show_structural_load_case", text="", icon=get_load_case_eye(load_case["id"]), emboss=False
+                ).load_case = load_case["id"]
+            for i, load in enumerate(load_case["loads"]):
+                row = box.row(align=True)
+                name = f"{load['group']}: {load['name']}" if load["group"] else load["name"]
+                row.label(text=name, icon="FORCE_FORCE")
+                draw_chain_order_buttons(row, chain, i, load_case["id"])
+                row.operator("bim.edit_structural_load_values", text="", icon="GREASEPENCIL").activity = load[
+                    "activity"
+                ]
+                row.operator("bim.remove_structural_activity", text="", icon="X").activity = load["activity"]
+        if unloaded := StructuralItemLoadsData.data["unloaded_cases"]:
+            layout.label(text=f"No loads in: {', '.join(unloaded)}")
+        if moments := StructuralItemLoadsData.data["moments"]:
+            box = layout.box()
+            box.label(text="Moments About This Point (A)", icon="FORCE_VORTEX")
+            for moment in moments:
+                row = box.row(align=True)
+                row.label(text=f"{moment['name']}: {moment['moment']}")
+                row.operator("bim.edit_structural_moment_centre", text="", icon="GREASEPENCIL").load_case = moment["id"]
+                row.operator("bim.edit_structural_resultant_moment", text="", icon="FORCE_VORTEX").load_case = moment[
+                    "id"
+                ]
+                row.operator(
+                    "bim.show_structural_load_case", text="", icon=get_load_case_eye(moment["id"]), emboss=False
+                ).load_case = moment["id"]
+
+
 class BIM_PT_structural_connection(Panel):
     bl_label = "Structural Connection"
     bl_idname = "BIM_PT_structural_connection"
@@ -257,7 +387,7 @@ class BIM_PT_structural_connection(Panel):
     bl_region_type = "WINDOW"
     bl_context = "object"
     bl_order = 1
-    bl_parent_id = "BIM_PT_tab_misc"
+    bl_parent_id = "BIM_PT_tab_object_structural"
 
     @classmethod
     def poll(cls, context):
@@ -290,22 +420,21 @@ class BIM_PT_structural_connection(Panel):
                 row = self.layout.row()
                 row.operator("bim.enable_editing_structural_item_axis", text="Edit Axis", icon="GREASEPENCIL")
         elif StructuralConnectionData.data["active_object_class"] == "IfcStructuralPointConnection":
-            if self.props.is_editing_connection_cs:
-                row = self.layout.row(align=True)
-                row.label(text="Editing Connection CS")
-                row.operator("bim.edit_structural_connection_cs", text="", icon="CHECKMARK")
-                row.operator("bim.disable_editing_structural_connection_cs", text="", icon="CANCEL")
-                row = self.layout.row(align=True)
-                row.prop(self.props, "ccs_x_angle", text="X Angle")
-                row = self.layout.row(align=True)
-                row.prop(self.props, "ccs_y_angle", text="Y Angle")
-                row = self.layout.row(align=True)
-                row.prop(self.props, "ccs_z_angle", text="Z Angle")
+            # The point's own axes, in the terms they were set in, with one dialog to edit them.
+            element = tool.Ifc.get_entity(obj)
+            mode, eighth, angle, slope = tool.Structural.get_axes_terms(element)
+            tilt = tool.Structural.get_axes_tilt(element)
+            if mode == "THREE_D":
+                text = "Axes: Turned in 3D"
+            elif slope:
+                text = f"Axes: {slope[0]:g}:{slope[1]:g} {eighth} ({tilt:.1f}°)"
+            elif abs(tilt) < 1e-9:
+                text = "Axes: Global"
             else:
-                row = self.layout.row()
-                row.operator(
-                    "bim.enable_editing_structural_connection_cs", text="Edit Connection CS", icon="GREASEPENCIL"
-                )
+                text = f"Axes: {angle:.1f}° {eighth}"
+            row = self.layout.row(align=True)
+            row.label(text=text)
+            row.operator("bim.edit_structural_connection_axes", text="", icon="GREASEPENCIL")
         else:
             row = self.layout.row()
             row.label(text="TODO")
@@ -381,16 +510,6 @@ class BIM_UL_structural_analysis_models(UIList):
                 op.structural_analysis_model = item.ifc_definition_id
             row.label(text=item.name)
 
-            if context.active_object:
-                if item.ifc_definition_id in StructuralAnalysisModelsData.data["active_model_ids"]:
-                    op = row.operator(
-                        "bim.unassign_structural_analysis_model", text="", icon="KEYFRAME_HLT", emboss=False
-                    )
-                    op.structural_analysis_model = item.ifc_definition_id
-                else:
-                    op = row.operator("bim.assign_structural_analysis_model", text="", icon="KEYFRAME", emboss=False)
-                    op.structural_analysis_model = item.ifc_definition_id
-
             if data.active_structural_analysis_model_id == item.ifc_definition_id:
                 row.operator("bim.edit_structural_analysis_model", text="", icon="CHECKMARK")
                 row.operator("bim.disable_editing_structural_analysis_model", text="", icon="CANCEL")
@@ -432,6 +551,10 @@ class BIM_PT_structural_load_cases(Panel):
     def draw_load_case_ui(self, load_case):
         row = self.layout.row(align=True)
         row.label(text=load_case["name"], icon="CON_CLAMPTO")
+        op = row.operator(
+            "bim.show_structural_load_case", text="", icon=get_load_case_eye(load_case["id"]), emboss=False
+        )
+        op.load_case = load_case["id"]
 
         if self.props.active_load_case_id and self.props.active_load_case_id == load_case["id"]:
             row.operator("bim.edit_structural_load_case", text="", icon="CHECKMARK")
@@ -475,11 +598,20 @@ class BIM_PT_structural_load_cases(Panel):
     def draw_editable_load_case_group_ui(self, load_case):
         box = self.layout.box()
         box.label(text="Applied Loads", icon="FORCE_FORCE")
-        for activity in load_case["activities"]:
-            row = box.row(align=True)
-            row.label(text=activity["name"])
-            row.operator("bim.edit_structural_load_values", text="", icon="GREASEPENCIL").activity = activity["id"]
-            row.operator("bim.remove_structural_activity", text="", icon="X").activity = activity["id"]
+        # Listed by item, each item's in the order they are drawn tip to tail.
+        for item, activities in itertools.groupby(load_case["activities"], key=lambda activity: activity["item"]):
+            activities = list(activities)
+            chain = [activity["id"] for activity in activities]
+            if len(chain) > 1:
+                row = box.row(align=True)
+                row.label(text=activities[0]["item_name"], icon="FORCE_FORCE")
+                draw_chain_reverse_button(row, chain, item, load_case["id"])
+            for i, activity in enumerate(activities):
+                row = box.row(align=True)
+                row.label(text=activity["name"])
+                draw_chain_order_buttons(row, chain, i, load_case["id"])
+                row.operator("bim.edit_structural_load_values", text="", icon="GREASEPENCIL").activity = activity["id"]
+                row.operator("bim.remove_structural_activity", text="", icon="X").activity = activity["id"]
         row = box.row(align=True)
         row.prop(self.props, "applicable_structural_load_types", text="")
         row.prop(self.props, "applicable_structural_loads", text="")
@@ -554,32 +686,51 @@ class BIM_PT_show_structural_activities(Panel):
         self.props = tool.Structural.get_structural_props()
 
         row = self.layout.row(align=True)
-        row.operator(
-            "bim.show_loads",
-            text="Show Loads",
-            icon="HIDE_OFF",
-        )
+        # The same setting as in the viewport's overlays.
+        row.prop(self.props, "show_loads", text="Show Loads", icon="HIDE_OFF")
         row = self.layout.row(align=True)
         row.prop(self.props, "reference_frame")
         row = self.layout.row(align=True)
         row.prop(self.props, "activity_type")
         row = self.layout.row(align=True)
         row.prop(self.props, "load_group_to_show")
+        # The point the shown load case's moments are taken about, as A.
+        row = self.layout.row(align=True)
+        try:
+            centre = tool.Structural.get_moment_centre(tool.Ifc.get().by_id(int(self.props.load_group_to_show)))
+        except (ValueError, RuntimeError):
+            centre = None
+        if centre:
+            row.label(text=f"Moments About A: {centre.Name or 'Unnamed'}", icon="FORCE_VORTEX")
+            row.operator("bim.set_structural_moment_centre", text="", icon="EYEDROPPER")
+            row.operator("bim.set_structural_moment_centre", text="", icon="X").clear = True
+        else:
+            row.operator("bim.set_structural_moment_centre", icon="FORCE_VORTEX")
         row = self.layout.row(align=True)
         row.prop(self.props, "force_display")
         row = self.layout.row(align=True)
         row.prop(self.props, "force_scale")
         row.prop(self.props, "show_force_angles")
-        if self.props.show_force_angles:
+        row.prop(self.props, "show_force_slopes")
+        self.layout.prop(self.props, "show_axes_components")
+        if self.props.show_force_angles or self.props.show_force_slopes:
             row = self.layout.row(align=True)
             row.prop(self.props, "angle_reference")
         row = self.layout.row(align=True)
         row.prop(self.props, "force_decimals")
         row.prop(self.props, "angle_decimals")
+        row = self.layout.row(align=True)
+        row.prop(self.props, "label_size")
+        row.prop(self.props, "arrow_thickness")
+        # Its diagrams are drawn with the settings above.
+        row = self.layout.row(align=True)
+        row.operator("bim.export_structural_calculations", icon="EXPORT")
+        row.prop(self.props, "report_detailed_steps")
 
 
 class BIM_PT_structural_loads(Panel):
-    bl_label = "Structural Loads"
+    bl_label = "Load Definitions"
+    bl_description = "Load values that applied loads use. One definition can be shared by several applied loads"
     bl_idname = "BIM_PT_structural_loads"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
@@ -598,7 +749,7 @@ class BIM_PT_structural_loads(Panel):
         self.props = tool.Structural.get_structural_props()
 
         row = self.layout.row(align=True)
-        row.label(text=f"{StructuralLoadsData.data['total_loads']} Structural Loads Found", icon="ANIM_DATA")
+        row.label(text=f"{StructuralLoadsData.data['total_loads']} Load Definitions", icon="ANIM_DATA")
         if self.props.is_editing_loads:
             row.operator(
                 "bim.toggle_filter_structural_loads",
@@ -622,6 +773,7 @@ class BIM_PT_structural_loads(Panel):
                 self.props,
                 "active_structural_load_index",
             )
+            self.layout.prop(self.props, "show_unused_loads_only")
 
         if self.props.active_structural_load_id:
             bonsai.bim.helper.draw_attributes(self.props.structural_load_attributes, self.layout)

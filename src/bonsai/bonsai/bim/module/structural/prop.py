@@ -47,8 +47,18 @@ def get_load_groups_to_show(self: "BIMStructuralProperties", context: bpy.types.
     return LoadGroupDecorationData.data["load_groups_to_show"]
 
 
+def update_unused_loads_only(self: "BIMStructuralProperties", context: bpy.types.Context) -> None:
+    bpy.ops.bim.load_structural_loads()
+
+
 def update_activity_type(self: "BIMStructuralProperties", context: bpy.types.Context) -> None:
     LoadGroupDecorationData.is_loaded = False
+
+
+def update_show_loads(self: "BIMStructuralProperties", context: bpy.types.Context) -> None:
+    from bonsai.bim.module.structural.decorator import show_loads
+
+    show_loads(self.show_loads)
 
 
 def update_loads_display(self: "BIMStructuralProperties", context: bpy.types.Context) -> None:
@@ -111,19 +121,6 @@ def updateAxisAngle(self: "BIMObjectStructuralProperties", context: bpy.types.Co
     empty.rotation_quaternion = x_axis.to_track_quat("X", "Z")
     empty.rotation_mode = "XYZ"
     empty.rotation_euler[0] = radians(self.axis_angle)
-
-
-def updateConnectionCS(self: "BIMObjectStructuralProperties", context: bpy.types.Context) -> None:
-    if not self.ccs_empty:
-        return
-    obj = context.active_object
-    assert obj and isinstance(obj.data, bpy.types.Mesh)
-    empty = self.ccs_empty
-    empty.location = obj.data.vertices[0].co
-    empty.rotation_mode = "XYZ"
-    empty.rotation_euler[0] = radians(self.ccs_x_angle)
-    empty.rotation_euler[1] = radians(self.ccs_y_angle)
-    empty.rotation_euler[2] = radians(self.ccs_z_angle)
 
 
 class StructuralAnalysisModel(PropertyGroup):
@@ -194,6 +191,12 @@ class BIMStructuralProperties(PropertyGroup):
     structural_load_types: EnumProperty(items=get_structural_load_types, name="Structural Load Types")
     structural_load_attributes: CollectionProperty(name="Structural Load Attributes", type=Attribute)
     filtered_structural_loads: BoolProperty(name="Filtered Structural Loads", default=False)
+    show_unused_loads_only: BoolProperty(
+        name="Unused Only",
+        description="Only list load definitions that are not applied in any load case or load group",
+        default=False,
+        update=update_unused_loads_only,
+    )
 
     boundary_conditions: CollectionProperty(name="Boundary Conditions", type=BoundaryCondition)
     active_boundary_condition_index: IntProperty(name="Active Boundary Condition Index")
@@ -203,7 +206,12 @@ class BIMStructuralProperties(PropertyGroup):
     boundary_condition_attributes: CollectionProperty(name="Boundary Condition Attributes", type=Attribute)
     filtered_boundary_conditions: BoolProperty(name="Filtered Boundary Conditions", default=False)
 
-    show_loads: BoolProperty(name="Show Loads", default=False)
+    show_loads: BoolProperty(
+        name="Structural Loads",
+        description="Show the loads on visible structural items in the viewport. Click a load to edit it",
+        default=True,
+        update=update_show_loads,
+    )
     update_load_repr: BoolProperty(name="Update Load Representation", default=False)
     enable_repr_auto_update: BoolProperty(name="Auto Update", default=False)
     reference_frame: EnumProperty(
@@ -241,13 +249,13 @@ class BIMStructuralProperties(PropertyGroup):
             ),
         ],
         name="Point Forces",
-        default="BOTH",
+        default="PARALLELOGRAM",
         update=update_loads_display,
     )
     force_decimals: IntProperty(
         name="Force Decimals",
         description="Decimal places of force and moment values shown with loads",
-        default=2,
+        default=0,
         min=0,
         max=8,
         update=update_loads_display,
@@ -255,19 +263,62 @@ class BIMStructuralProperties(PropertyGroup):
     angle_decimals: IntProperty(
         name="Angle Decimals",
         description="Decimal places of angles shown with loads",
-        default=2,
+        default=1,
         min=0,
         max=8,
         update=update_loads_display,
     )
+    arrow_thickness: FloatProperty(
+        name="Arrow Thickness",
+        description="Scale force arrows, their shafts and heads together, in the viewport and in exported calculations",
+        default=1.0,
+        min=0.25,
+        max=5.0,
+        step=10,
+        update=update_loads_display,
+    )
+    label_size: FloatProperty(
+        name="Label Size",
+        description="Scale the labels of load diagrams, in the viewport and in exported calculations",
+        default=2.0,
+        min=0.5,
+        max=4.0,
+        step=10,
+        update=update_loads_display,
+    )
     show_force_angles: BoolProperty(
         name="Angles",
-        description="Mark the angle of each point force from a horizontal reference axis",
+        description="Mark the angle of each point force from a reference axis",
         default=True,
+        update=update_loads_display,
+    )
+    report_detailed_steps: BoolProperty(
+        name="Detailed Steps",
+        description="Show more of how the equations resolve in exported calculations, in grey, to learn from",
+        default=False,
+    )
+    show_force_slopes: BoolProperty(
+        name="Slopes",
+        description="Mark the slope of each point force as a rise and run triangle beside it",
+        default=False,
+        update=update_loads_display,
+    )
+    show_axes_components: BoolProperty(
+        name="Point Axes Components",
+        description=(
+            "Also show each point force's components along its point's own tilted axes, x' and z', as along an "
+            "incline, beside its X and Z ones"
+        ),
+        default=False,
         update=update_loads_display,
     )
     angle_reference: EnumProperty(
         items=[
+            (
+                "EIGHTH",
+                "Load Direction",
+                "The angle from the axis of the eighth (Q1 to Q8) the force points into, as Edit Load enters it",
+            ),
             (
                 "HORIZONTAL",
                 "Nearest Horizontal",
@@ -276,7 +327,7 @@ class BIMStructuralProperties(PropertyGroup):
             ("POSITIVE_X", "+X Axis", "The angle counter-clockwise from the +X axis"),
         ],
         name="Angle From",
-        default="HORIZONTAL",
+        default="EIGHTH",
         update=update_loads_display,
     )
     force_scale: FloatProperty(
@@ -309,6 +360,7 @@ class BIMStructuralProperties(PropertyGroup):
         structural_load_types: str
         structural_load_attributes: bpy.types.bpy_prop_collection_idprop[Attribute]
         filtered_structural_loads: bool
+        show_unused_loads_only: bool
 
         boundary_conditions: bpy.types.bpy_prop_collection_idprop[BoundaryCondition]
         active_boundary_condition_index: int
@@ -327,9 +379,14 @@ class BIMStructuralProperties(PropertyGroup):
         force_display: str
         force_scale: float
         show_force_angles: bool
+        show_force_slopes: bool
+        show_axes_components: bool
+        report_detailed_steps: bool
         angle_reference: str
         force_decimals: int
         angle_decimals: int
+        label_size: float
+        arrow_thickness: float
 
 
 class BIMObjectStructuralProperties(PropertyGroup):
@@ -342,11 +399,6 @@ class BIMObjectStructuralProperties(PropertyGroup):
     axis_empty: PointerProperty(name="Axis Empty", type=bpy.types.Object)
 
     # relating_structural_activity: PointerProperty(name="Relating Structural Activity", type=bpy.types.Object)
-    is_editing_connection_cs: BoolProperty(name="Is Editing Connection CS", default=False)
-    ccs_x_angle: FloatProperty(name="Connection CS X Angle", update=updateConnectionCS)
-    ccs_y_angle: FloatProperty(name="Connection CS Y Angle", update=updateConnectionCS)
-    ccs_z_angle: FloatProperty(name="Connection CS Z Angle", update=updateConnectionCS)
-    ccs_empty: PointerProperty(name="CCS Empty", type=bpy.types.Object)
 
     if TYPE_CHECKING:
         boundary_condition_attributes: bpy.types.bpy_prop_collection_idprop[Attribute]
@@ -358,8 +410,3 @@ class BIMObjectStructuralProperties(PropertyGroup):
         axis_empty: Union[bpy.types.Object, None]
 
         # relating_structural_activity: Union[bpy.types.Object, None]
-        is_editing_connection_cs: bool
-        ccs_x_angle: float
-        ccs_y_angle: float
-        ccs_z_angle: float
-        ccs_empty: Union[bpy.types.Object, None]
