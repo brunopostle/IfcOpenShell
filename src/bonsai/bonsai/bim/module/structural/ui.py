@@ -366,7 +366,7 @@ class BIM_PT_structural_item_loads(Panel):
             layout.label(text=f"No loads in: {', '.join(unloaded)}")
         if moments := StructuralItemLoadsData.data["moments"]:
             box = layout.box()
-            box.label(text="Moments About This Point (A)", icon="FORCE_VORTEX")
+            box.label(text="Moments About This Point", icon="FORCE_VORTEX")
             for moment in moments:
                 row = box.row(align=True)
                 row.label(text=f"{moment['name']}: {moment['moment']}")
@@ -701,7 +701,7 @@ class BIM_PT_show_structural_activities(Panel):
         except (ValueError, RuntimeError):
             centre = None
         if centre:
-            row.label(text=f"Moments About A: {centre.Name or 'Unnamed'}", icon="FORCE_VORTEX")
+            row.label(text=f"Moments About {(centre.Name or '').strip() or 'A'}", icon="FORCE_VORTEX")
             row.operator("bim.set_structural_moment_centre", text="", icon="EYEDROPPER")
             row.operator("bim.set_structural_moment_centre", text="", icon="X").clear = True
         else:
