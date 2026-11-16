@@ -28,6 +28,7 @@ import bpy
 import ifcopenshell.api.attribute
 import ifcopenshell.api.group
 import ifcopenshell.api.structural
+import ifcopenshell.util.element
 import ifcopenshell.util.unit
 import numpy as np
 from bpy_extras.view3d_utils import location_3d_to_region_2d
@@ -1482,7 +1483,7 @@ def update_force_inputs(self: "StructuralForceInput", context: bpy.types.Context
                 {activity.id(): (self.magnitude_locked, self.direction_locked)},
                 {activity.GlobalId: (get_same_magnitude_guid(self), getattr(self, "magnitude_ratio", 1.0))},
             )
-            for load, solved in (forces or {}).items():
+            for load, solved in ((a.AppliedLoad, f) for a, f in (forces or {}).items()):
                 ShaderInfo.preview[load.id()] = get_force_attributes(load, solved)
                 if load.id() == self.preview_load:  # Its own unknowns are found too.
                     ShaderInfo.preview[load.id()].update({k: v for k, v in attributes.items() if "Moment" in k})
@@ -1500,7 +1501,9 @@ def update_force_inputs(self: "StructuralForceInput", context: bpy.types.Context
         redraw_loads(context)
     elif getattr(self, "is_previewing", False) and LoadsDecorator.is_installed:
         forces, resultant, _ = solve_resultant(self)
-        ShaderInfo.preview = {load.id(): get_force_attributes(load, force) for load, force in (forces or {}).items()}
+        ShaderInfo.preview = {
+            a.AppliedLoad.id(): get_force_attributes(a.AppliedLoad, force) for a, force in (forces or {}).items()
+        }
         item = get_resultant_item_and_load_case(self)[0]
         ShaderInfo.preview_resultant_eighths = {item.id(): get_chosen_eighth(self, resultant)} if item else {}
         redraw_loads(context)
@@ -1554,7 +1557,8 @@ def get_resolved_forces(
     :param forces: Forces to take instead of applied loads' own, by activity id, as while editing one.
     :param locks: Locks likewise.
     :param links: Magnitude links likewise, by GlobalId: the other's GlobalId or None, and a ratio.
-    :return: The loads to change, and their forces, or none if no resultant is locked there, or why not.
+    :return: The applied loads whose forces change, and their forces, or none if no resultant is locked there, or
+        why not. Keyed by applied load rather than load, as a load may be shared with applied loads elsewhere.
     """
     connects = activity.AssignedToStructuralItem
     item = connects[0].RelatingElement if connects else None
@@ -1578,7 +1582,27 @@ def get_resolved_forces(
     )
     if error:
         return None, error
-    return {a.AppliedLoad: f for a, f, lock in zip(activities, solved, lock_values) if not all(lock)}, ""
+    return {a: f for a, f, lock in zip(activities, solved, lock_values) if not all(lock)}, ""
+
+
+def write_activity_forces(forces: dict[ifcopenshell.entity_instance, tuple]) -> None:
+    """Set the forces solved for applied loads. One whose load other applied loads also use gets its own copy of it
+    first, so that solving at one item changes no other: a load can be shared across items and load cases."""
+    unshare_loads(list(forces))
+    write_forces({activity.AppliedLoad: force for activity, force in forces.items()})
+
+
+def unshare_loads(activities: list[ifcopenshell.entity_instance]) -> None:
+    """Give each applied load its own copy of its load if any other applied load uses that load too"""
+    ifc_file = tool.Ifc.get()
+    for activity in activities:
+        load = activity.AppliedLoad
+        if load and get_load_users(load) != [activity]:
+            activity.AppliedLoad = ifcopenshell.util.element.copy(ifc_file, load)
+
+
+def get_load_users(load: ifcopenshell.entity_instance) -> list[ifcopenshell.entity_instance]:
+    return [i for i in tool.Ifc.get().get_inverse(load) if i.is_a("IfcStructuralActivity")]
 
 
 def write_forces(forces: dict[ifcopenshell.entity_instance, tuple]) -> None:
@@ -1607,7 +1631,7 @@ def resolve_resultants(operator: bpy.types.Operator, activities: list[ifcopenshe
         if error:
             operator.report({"WARNING"}, f"The locked resultant could not be kept: {error}")
         elif forces:
-            write_forces(forces)
+            write_activity_forces(forces)
 
 
 def get_resultant_activities(props: "EditStructuralResultant") -> list[ifcopenshell.entity_instance]:
@@ -1629,7 +1653,8 @@ def get_force_attributes(load: ifcopenshell.entity_instance, force: tuple) -> di
 def solve_resultant(
     props: "EditStructuralResultant",
 ) -> tuple[Union[dict[ifcopenshell.entity_instance, tuple], None], Union[tuple, None], str]:
-    """Get the loads to change, their new forces, and the resultant, by finding what is unlocked, or why not"""
+    """Get the applied loads whose forces change, their new forces, and the resultant, by finding what is unlocked,
+    or why not"""
     activities = get_resultant_activities(props)[:32]
     loads = [activity.AppliedLoad for activity in activities]
     locks = [(props.magnitude_locks[i], props.direction_locks[i]) for i in range(len(loads))]
@@ -1655,7 +1680,7 @@ def solve_resultant(
     )
     if error:
         return None, None, error
-    return {load: force for load, force, lock in zip(loads, forces, locks) if not all(lock)}, resultant, ""
+    return {a: force for a, force, lock in zip(activities, forces, locks) if not all(lock)}, resultant, ""
 
 
 def get_resultant_item_and_load_case(
@@ -2693,16 +2718,16 @@ class EditStructuralResultant(bpy.types.Operator, tool.Ifc.Operator, StructuralF
         box = layout.box()
         if not (self.magnitude_locked and self.direction_locked):
             box.label(text=f"Resultant: {get_force_name(resultant, unit)}", icon="FORCE_FORCE")
-        ifc_file = tool.Ifc.get()
-        for load, force in forces.items():
+        for activity, force in forces.items():
+            load = activity.AppliedLoad
             old = get_force(load)
             new = math.copysign(math.hypot(*force), sum(a * b for a, b in zip(force, old)))
             box.label(text=f"{load.Name or 'Unnamed'}: {math.hypot(*old):.2f} → {abs(new):.2f} {unit}")
             if new < 0:
                 box.label(text="  reverses its direction (a pull becomes a push)", icon="ERROR")
-            users = [i for i in ifc_file.get_inverse(load) if i.is_a("IfcStructuralActivity")]
-            if len(users) > 1:
-                box.label(text=f"  also used by {len(users) - 1} other applied load(s)", icon="INFO")
+            if len(users := get_load_users(load)) > 1:
+                others = len(users) - 1
+                box.label(text=f"  also used by {others} other applied load(s), so it gets its own copy", icon="INFO")
 
     def cancel(self, context):
         clear_previews(context)
@@ -2716,7 +2741,7 @@ class EditStructuralResultant(bpy.types.Operator, tool.Ifc.Operator, StructuralF
         activities = get_resultant_activities(self)
         for i, activity in enumerate(activities[:32]):
             tool.Structural.set_locks(activity, self.magnitude_locks[i], self.direction_locks[i])
-        write_forces(forces)
+        write_activity_forces(forces)
         # Keep the resultant as locked, so that editing a force later solves the unknowns again to keep it.
         item, load_case = self.get_item_and_load_case()
         if item:
