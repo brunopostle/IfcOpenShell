@@ -112,33 +112,6 @@ def start_load_picking() -> None:
             bpy.ops.bim.pick_structural_loads("INVOKE_DEFAULT")
 
 
-def show_loads(shown: bool) -> None:
-    """Show or hide the structural loads overlay, and pick loads to edit while they are shown"""
-    if shown and tool.Ifc.get():
-        LoadsDecorator.install(bpy.context)
-        if not bpy.app.timers.is_registered(start_load_picking):
-            bpy.app.timers.register(start_load_picking)
-    elif LoadsDecorator.is_installed:
-        LoadsDecorator.uninstall()
-    tool.Blender.update_all_viewports()
-
-
-def show_loads_after_load() -> None:
-    """Restore the loads overlay once a file and its IFC have loaded"""
-    show_loads(tool.Structural.get_structural_props().show_loads)
-
-
-def start_load_picking() -> None:
-    """Start picking shown loads to edit, which needs a window to run an operator in"""
-    if (
-        LoadsDecorator.is_installed
-        and not LoadsDecorator.is_picking
-        and (windows := bpy.context.window_manager.windows)
-    ):
-        with bpy.context.temp_override(window=windows[0]):
-            bpy.ops.bim.pick_structural_loads("INVOKE_DEFAULT")
-
-
 class LoadsDecorator(tool.Blender.ViewportDecorator):
     """Decorator to show structural loads in 3D"""
 
