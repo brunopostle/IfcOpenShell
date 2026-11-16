@@ -496,6 +496,34 @@ class Structural(bonsai.core.tool.Structural):
         return cases[0] if cases else None
 
     @classmethod
+    def get_activity_factor(
+        cls, activity: ifcopenshell.entity_instance, load_case: Union[ifcopenshell.entity_instance, None]
+    ) -> float:
+        """What an applied load is multiplied by in a load case, as Show Loads draws it there: the Coefficient of
+        each load group from the case down to the activity, the case's own included, times the Factor of each
+        IfcRelAssignsToGroupByFactor on the way. 1 if the activity is not in the case."""
+
+        def factor_up(obj: ifcopenshell.entity_instance, depth: int) -> Union[float, None]:
+            if depth > 10:
+                return None
+            for rel in obj.HasAssignments or ():
+                group = rel.RelatingGroup if rel.is_a("IfcRelAssignsToGroup") else None
+                if not group or not group.is_a("IfcStructuralLoadGroup"):
+                    continue
+                rel_factor = rel.Factor if rel.is_a("IfcRelAssignsToGroupByFactor") and rel.Factor is not None else 1.0
+                coefficient = group.Coefficient if group.Coefficient is not None else 1.0
+                if group == load_case:
+                    return rel_factor * coefficient
+                if (above := factor_up(group, depth + 1)) is not None:
+                    return above * rel_factor * coefficient
+            return None
+
+        if not load_case:
+            return 1.0
+        factor = factor_up(activity, 0)
+        return 1.0 if factor is None else factor
+
+    @classmethod
     def get_resultant(
         cls, item: ifcopenshell.entity_instance, load_case: ifcopenshell.entity_instance
     ) -> Union[dict[str, Any], None]:
