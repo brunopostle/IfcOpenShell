@@ -139,19 +139,23 @@ class TestPointForcesArePickable(NewIfc):
         _, activities = self.apply_forces((300.0, 400.0), (-200.0, 0.0))
         tool.Structural.get_structural_props().force_display = "PARALLELOGRAM"
         info = self.draw()
-        # The resultant stands for no one load, so it is not pickable.
-        assert sorted(p["activity"] for p in info.pickables) == sorted(a.id() for a in activities)
+        # Each load picks its own; the resultant stands for no one load, so it picks them all, to edit as one.
+        ids = sorted(a.id() for a in activities)
+        assert sorted(p["activity"] for p in info.pickables if p["activity"]) == ids
+        assert [sorted(p["activities"]) for p in info.pickables if "activities" in p] == [ids]
 
     def test_the_components_of_a_resultant_of_several_forces_are_not_pickable(self):
         self.apply_forces((300.0, 400.0), (-200.0, 0.0))
         tool.Structural.get_structural_props().force_display = "BOTH"
-        assert self.draw().pickables == []
+        # Only the resultant and the label adding a load to it are, as they stand for no one load.
+        assert not [p for p in self.draw().pickables if p["activity"]]
 
     def test_a_single_force_is_picked_by_its_components_and_itself(self):
         _, activities = self.apply_forces((300.0, 400.0))
         info = self.draw()
-        assert len(info.pickables) == 3  # Its X and Z components and the force itself.
-        assert {p["activity"] for p in info.pickables} == {activities[0].id()}
+        own = [p for p in info.pickables if p["activity"]]  # Besides the label adding a load.
+        assert len(own) == 3  # Its X and Z components and the force itself.
+        assert {p["activity"] for p in own} == {activities[0].id()}
 
     def test_drawing_is_tagged_with_its_item_to_hide_with_it(self):
         point, _ = self.apply_forces((300.0, 400.0))
@@ -161,6 +165,7 @@ class TestPointForcesArePickable(NewIfc):
 
     def test_a_previewed_load_is_drawn_with_its_dialog_values(self):
         _, activities = self.apply_forces((0.0, -100.0))
+        tool.Structural.get_structural_props().force_decimals = 2
         ShaderInfo.preview = {activities[0].AppliedLoad.id(): {"ForceX": None, "ForceY": None, "ForceZ": -750.0}}
         try:
             info = self.draw()
