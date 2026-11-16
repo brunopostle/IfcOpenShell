@@ -1307,6 +1307,43 @@ def update_force_inputs(self: "StructuralForceInput", context: bpy.types.Context
         redraw_loads(context)
 
 
+def get_activity_factors(activities: list[ifcopenshell.entity_instance]) -> list[float]:
+    """What each applied load is multiplied by in its load case, as Show Loads draws it, so that a resultant is
+    solved in the forces drawn"""
+    return [tool.Structural.get_activity_factor(a, tool.Structural.get_activity_load_case(a)) for a in activities]
+
+
+def solve_factored(
+    activities: list[ifcopenshell.entity_instance],
+    values: list[tuple],
+    locks: list[tuple[bool, bool]],
+    resultant: tuple,
+    resultant_locks: tuple[bool, bool],
+    links: Union[dict[str, Any], None] = None,
+) -> tuple[Union[list[tuple], None], Union[tuple, None], str]:
+    """Solve the unknowns of applied loads in the forces drawn, each load times its factor in its load case, and
+    give the loads' own values back: a load group's Coefficient, or a factor it is assigned by, scales what is
+    drawn, so the resultant set is of the scaled forces.
+
+    :param values: The loads' own forces, unscaled.
+    :return: The loads' own forces with the unknowns found, the resultant, and why not if they cannot be.
+    """
+    multipliers = get_activity_factors(activities)
+    if any(not m and not all(lock) for m, lock in zip(multipliers, locks)):
+        return None, None, "A load to find has a factor of 0 in its load case, so nothing can be found for it"
+    groups, link_factors = tool.Structural.get_magnitude_links(activities, links)
+    if link_factors:
+        # Linked as the loads' own magnitudes are, so as the drawn ones are, each times its own factor.
+        link_factors = [f * m for f, m in zip(link_factors, multipliers)]
+    scale = lambda force, k: tuple(c * k for c in force)
+    solved, resultant, error = tool.Structural.solve_unknowns(
+        [scale(v, m) for v, m in zip(values, multipliers)], locks, resultant, resultant_locks, groups, link_factors
+    )
+    if error:
+        return None, None, error
+    return [scale(f, 1 / m) if m else tuple(v) for f, v, m in zip(solved, values, multipliers)], resultant, ""
+
+
 def get_resolved_forces(
     activity: ifcopenshell.entity_instance,
     forces: Union[dict[int, tuple], None] = None,
@@ -1332,14 +1369,13 @@ def get_resolved_forces(
     ]
     values = [(forces or {}).get(a.id(), get_force(a.AppliedLoad)) for a in activities]
     lock_values = [(locks or {}).get(a.id(), tool.Structural.get_locks(a)) for a in activities]
-    groups, factors = tool.Structural.get_magnitude_links(activities, links)
-    solved, _, error = tool.Structural.solve_unknowns(
+    solved, _, error = solve_factored(
+        activities,
         values,
         lock_values,
         tuple(resultant["Force"]),
         (resultant["MagnitudeLocked"], resultant["DirectionLocked"]),
-        groups,
-        factors,
+        links,
     )
     if error:
         return None, error
@@ -1411,14 +1447,12 @@ def solve_resultant(
             direction=props.direction,
         )
         resultant = (x, 0.0, z)
-    groups, factors = tool.Structural.get_magnitude_links(activities)
-    forces, resultant, error = tool.Structural.solve_unknowns(
+    forces, resultant, error = solve_factored(
+        activities[: len(loads)],
         [get_force(load) for load in loads],
         locks,
         resultant,
         (props.magnitude_locked, props.direction_locked),
-        groups,
-        factors,
     )
     if error:
         return None, None, error
@@ -2411,7 +2445,11 @@ class EditStructuralResultant(bpy.types.Operator, tool.Ifc.Operator, StructuralF
             self.report({"ERROR"}, "Only forces in global coordinates can be adjusted to a resultant.")
             return {"CANCELLED"}
         self.load_category = "IfcStructuralPointConnection"
-        x, y, z = (sum(get_force(a.AppliedLoad)[k] for a in activities) for k in range(3))
+        # The resultant of the forces as drawn, each load times its factor in its load case.
+        drawn = [
+            tuple(c * m for c in get_force(a.AppliedLoad)) for a, m in zip(activities, get_activity_factors(activities))
+        ]
+        x, y, z = (sum(force[k] for force in drawn) for k in range(3))
         self.x, self.y, self.z = x, y, z
         self.set_in_plane_inputs(x, z)
         self.input_mode = "ANGLE" if not y else "COMPONENTS"
