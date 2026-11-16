@@ -720,7 +720,8 @@ class ShaderInfo:
                     if label.get("focus") in found_focus and not label["text"].startswith("M"):
                         label["text"] += " 🔓"
             self.add_moment_pickable(info, info_end, texts, group.id(), point.id(), activity)
-        self.add_moment_arrow(at, total, size, "ΣM_A" if len(forces) > 1 else "M_A", group.id())
+        symbol = tool.Structural.get_centre_symbol(group)
+        self.add_moment_arrow(at, total, size, f"ΣM_{symbol}" if len(forces) > 1 else f"M_{symbol}", group.id())
         if self.load_group is not None:
             # A report's diagram stands alone, so it also draws what the viewport has around it.
             self.add_moment_context(centre, at, forces, size, reach, colors)
@@ -771,8 +772,8 @@ class ShaderInfo:
                     continue
                 self.add_dashed_line(a, b, size, gray, dashed=False)
         for point, location in points.values():
-            name = point.Name or "Unnamed"
-            text = "A" if point == centre and name == "A" else f"A: {name}" if point == centre else name
+            # By its own name, the centre too, as its moments are written ΣM_B; an unnamed centre as A.
+            text = (point.Name or "").strip() or ("A" if point == centre else "Unnamed")
             self.text_info.append({"position": location, "text": text, "color": gray, "away": np.array((-1, 0, -1.0))})
         scale = self.moment_force_scale or 1.0 / max(np.linalg.norm(force) for _, _, _, force in forces)
         ifc_file = tool.Ifc.get()

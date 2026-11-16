@@ -141,6 +141,15 @@ def get_report_data(
     }
 
 
+def get_centre_symbols(load_group: ifcopenshell.entity_instance) -> tuple[str, str]:
+    """A load case's moment centre as LaTeX writes it, in maths, as the subscript of ΣM_B, and in words: its point's
+    name, or A for an unnamed one, as statics texts write a moment centre"""
+    name = tool.Structural.get_centre_symbol(load_group)
+    word = re.sub(r"([#$%&_{}])", r"\\\1", name)
+    maths = name if re.fullmatch(r"[A-Za-z][0-9]?", name) else f"\\text{{{word}}}"
+    return maths, word
+
+
 def get_moment_calculation(
     case: ifcopenshell.entity_instance,
     drawing: Union[ShaderInfo, None],
@@ -156,6 +165,7 @@ def get_moment_calculation(
     centre = tool.Structural.get_moment_centre(case)
     if not centre or not (centre_obj := tool.Ifc.get_object(centre)) or centre_obj.type != "MESH":
         return None
+    c, word = get_centre_symbols(case)
     if drawing is None:
         drawing = ShaderInfo(case)
         drawing.update()
@@ -201,7 +211,7 @@ def get_moment_calculation(
                 row["dx" if place_kind == "POINT_X" else "dz"] += " 🔓"  # Where it acts, found for the moment kept.
             unknowns.append((i, locks, math.hypot(x, z), arm, math.hypot(dx, dz), activity, x, z, dz, dx))
             rows.append(row)
-            steps += get_arm_steps(i, dx, dz, x, z, arm, length_text, point, at)
+            steps += get_arm_steps(i, dx, dz, x, z, arm, length_text, point, at, c, word)
             sign = "-" if moment < 0 else ""
             steps.append(
                 f"M_{{{i}}} = {sign}F_{{{i}}}\\, d_{{{i}}} = {sign}({math.hypot(x, z):.2f})({arm:.2f}{length_text})"
@@ -223,7 +233,7 @@ def get_moment_calculation(
     if not values:
         return None
     total = sum(values)
-    symbol = "\\Sigma M_A" if len(values) > 1 else "M_A"
+    symbol = f"\\Sigma M_{{{c}}}" if len(values) > 1 else f"M_{{{c}}}"
     if len(values) > 1:
         terms = " + ".join(f"M_{{{i}}}" for i in range(1, len(values) + 1))
         numbers = " + ".join(f"({v:.2f})" for v in values)
@@ -234,7 +244,7 @@ def get_moment_calculation(
     name = f"{get_slug(case.Name)}_moments_{centre.id()}.svg"
     has_diagram = write_diagram(drawing, centre, directory / "diagrams" / name, key=f"{centre_obj.name} moments")
     return {
-        "centre": centre.Name or "Unnamed",
+        "centre": tool.Structural.get_centre_symbol(case),
         "diagram": f"diagrams/{name}" if has_diagram else None,
         "forces": rows,
         "steps": [
@@ -248,7 +258,8 @@ def get_moment_calculation(
             for step in steps
             if detailed or not isinstance(step, Detail)
         ],
-        "summary": f"{'ΣM' if len(values) > 1 else 'M'} about A = {total:+.2f} {unit}, counter-clockwise positive.",
+        "summary": f"{'ΣM' if len(values) > 1 else 'M'} about {tool.Structural.get_centre_symbol(case)} = "
+        f"{total:+.2f} {unit}, counter-clockwise positive.",
         "unit": unit,
         "length_unit": length_unit,
     }
@@ -268,8 +279,9 @@ def get_kept_moment_steps(
     """
     kept = tool.Structural.get_resultant_moment(case)
     kind, activity = tool.Structural.get_moment_centre_unknown(case)
+    c, word = get_centre_symbols(case)
     if kept is not None and kind:
-        return get_kept_centre_steps(kind, activity, kept, values, unknowns, text_unit)
+        return get_kept_centre_steps(kind, activity, kept, values, unknowns, text_unit, c, word)
     found = [entry for entry in unknowns if not all(entry[1])]
     if kept is None or not found:
         return []
@@ -278,8 +290,8 @@ def get_kept_moment_steps(
     rest = sum(values) - moment
     force_text = r"\ \text{" + re.sub(r"([#$%&_{}])", r"\\\1", force_unit) + "}"
     steps = [
-        f"\\text{{Kept: }} \\Sigma M_A = {kept:.2f}{text_unit}",
-        f"M_{{{i}}} = \\Sigma M_A - \\textstyle\\sum_{{others}} M = ({kept:.2f}) - ({rest:.2f}) = {moment:.2f}{text_unit}",
+        f"\\text{{Kept: }} \\Sigma M_{{{c}}} = {kept:.2f}{text_unit}",
+        f"M_{{{i}}} = \\Sigma M_{{{c}}} - \\textstyle\\sum_{{others}} M = ({kept:.2f}) - ({rest:.2f}) = {moment:.2f}{text_unit}",
     ]
     if not locks[0] and arm:
         value = bold(f"{magnitude:.2f}", True, force_text)
@@ -304,6 +316,8 @@ def get_kept_centre_steps(
     values: list[float],
     unknowns: list[tuple],  # Each force's number, locks, magnitude, arm, r, applied load, X, Z and Δz.
     text_unit: str,
+    c: str = "A",
+    word: str = "A",
 ) -> list[str]:
     """How a place was found when a load case keeps a sum of moments and a place is its unknown. A force's point
     along X: from the moment it must make, as A and the other forces stay. A's place: with one force, its arm, r or
@@ -313,18 +327,18 @@ def get_kept_centre_steps(
         return []
     i, _, magnitude, arm, r, _, x, z, dz, dx = entry
     if kind in ("POINT_REACH", "POINT_SWING"):
-        how = "along the line from A" if kind == "POINT_REACH" else "round A, its distance kept"
+        how = f"along the line from {word}" if kind == "POINT_REACH" else f"round {word}, its distance kept"
         return [
-            f"\\text{{Kept: }} \\Sigma M_A = {kept:.2f}{text_unit}",
+            f"\\text{{Kept: }} \\Sigma M_{{{c}}} = {kept:.2f}{text_unit}",
             f"\\text{{The point of }} F_{{{i}}} \\text{{ is placed for it, {how}}}",
         ]
     if kind in ("POINT_X", "POINT_Z") and (z if kind == "POINT_X" else x):
         moment = values[i - 1]
         length_text = r"\ \text{" + text_unit.rpartition(".")[2].rstrip("}") + "}"
         steps = [
-            f"\\text{{Kept: }} \\Sigma M_A = {kept:.2f}{text_unit}",
+            f"\\text{{Kept: }} \\Sigma M_{{{c}}} = {kept:.2f}{text_unit}",
             f"\\text{{The point of }} F_{{{i}}} \\text{{ is placed for it, along {kind[-1]}}}",
-            f"M_{{{i}}} = \\Sigma M_A - \\textstyle\\sum_{{others}} M = ({kept:.2f}) - ({sum(values) - moment:.2f})"
+            f"M_{{{i}}} = \\Sigma M_{{{c}}} - \\textstyle\\sum_{{others}} M = ({kept:.2f}) - ({sum(values) - moment:.2f})"
             f" = {moment:.2f}{text_unit}",
         ]
         # From its moment, F_z dx - F_x dz, the distance along the way it moves.
@@ -348,8 +362,8 @@ def get_kept_centre_steps(
         "SWING": f"\\text{{angle }} \\phi_{{{i}}}",
     }
     steps = [
-        f"\\text{{Kept: }} \\Sigma M_A = {kept:.2f}{text_unit}",
-        f"\\text{{A is placed for it, its }} {words[kind]} \\text{{ found}}",
+        f"\\text{{Kept: }} \\Sigma M_{{{c}}} = {kept:.2f}{text_unit}",
+        f"\\text{{{word} is placed for it, its }} {words[kind]} \\text{{ found}}",
     ]
     if len(values) != 1 or not magnitude:
         return steps  # Moving A changes every force's moment, so its place follows from them all at once.
@@ -358,19 +372,19 @@ def get_kept_centre_steps(
     if kind == "ARM":
         value = bold(f"{abs(kept) / magnitude:.2f}", True, length_text)
         steps.append(
-            f"d_{{{i}}} = \\frac{{|M_A|}}{{F_{{{i}}}}} = \\frac{{{abs(kept):.2f}}}{{{magnitude:.2f}}} = {value}"
+            f"d_{{{i}}} = \\frac{{|M_{{{c}}}|}}{{F_{{{i}}}}} = \\frac{{{abs(kept):.2f}}}{{{magnitude:.2f}}} = {value}"
         )
     elif kind == "REACH" and r and arm:
         sine = arm / r
         value = bold(f"{abs(kept) / (magnitude * sine):.2f}", True, length_text)
         steps.append(
-            f"r_{{{i}}} = \\frac{{|M_A|}}{{F_{{{i}}} \\sin \\phi_{{{i}}}}} = "
+            f"r_{{{i}}} = \\frac{{|M_{{{c}}}|}}{{F_{{{i}}} \\sin \\phi_{{{i}}}}} = "
             f"\\frac{{{abs(kept):.2f}}}{{({magnitude:.2f})({sine:.4f})}} = {value}"
         )
     elif kind == "SWING" and r:
         sine = min(abs(kept) / (magnitude * r), 1.0)
         steps.append(
-            f"\\sin \\phi_{{{i}}} = \\frac{{|M_A|}}{{F_{{{i}}}\\, r_{{{i}}}}} = "
+            f"\\sin \\phi_{{{i}}} = \\frac{{|M_{{{c}}}|}}{{F_{{{i}}}\\, r_{{{i}}}}} = "
             f"\\frac{{{abs(kept):.2f}}}{{({magnitude:.2f})({r:.2f})}} = {sine:.4f}"
         )
         angle = f"{math.degrees(math.asin(sine)):.1f}" + "^\\circ"
@@ -388,6 +402,8 @@ def get_arm_steps(
     length_text: str,
     point: Union[np.ndarray, None] = None,
     at: Union[np.ndarray, None] = None,
+    c: str = "A",
+    word: str = "A",
 ) -> list[str]:
     """How a force's moment arm is found, as a text finds it from the figure: r from A to the force's point, the
     angle phi between r and the force's line of action, d = r sin phi, the distance square to that line, and s =
@@ -397,7 +413,7 @@ def get_arm_steps(
     """
     r = math.hypot(dx, dz)
     if r < 1e-9:
-        return [f"r_{{{i}}} = 0:\\ F_{{{i}}} \\text{{ acts at A, so }} d_{{{i}}} = 0"]
+        return [f"r_{{{i}}} = 0:\\ F_{{{i}}} \\text{{ acts at {word}, so }} d_{{{i}}} = 0"]
     along_r = math.degrees(math.atan2(dz, dx)) % 360
     along_force = math.degrees(math.atan2(z, x)) % 360
     between = abs(along_force - along_r)
@@ -406,7 +422,7 @@ def get_arm_steps(
     if point is not None and at is not None:
         # From A to the force's point, as the table's distances run.
         for axis, k, delta in (("x", 0, dx), ("z", 2, dz)):
-            step = f"\\Delta {axis}_{{{i}}} = {axis}_{{F{i}}} - {axis}_{{A}} = ({point[k]:.2f}) - ({at[k]:.2f}) = {delta:.2f}"
+            step = f"\\Delta {axis}_{{{i}}} = {axis}_{{F{i}}} - {axis}_{{{c}}} = ({point[k]:.2f}) - ({at[k]:.2f}) = {delta:.2f}"
             steps.append(Lead(step) if axis == "x" else Detail(step))
     s = r * math.cos(math.radians(phi))
     steps += [

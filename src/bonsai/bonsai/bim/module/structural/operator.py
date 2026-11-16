@@ -2159,6 +2159,12 @@ def get_activity_load_groups(activity: ifcopenshell.entity_instance) -> list[ifc
     ]
 
 
+def get_object_centre_symbol(obj: Union[bpy.types.Object, None]) -> str:
+    """The moment centre as labels write it, by its point's name, or A, as statics texts write one, if it has none"""
+    element = tool.Ifc.get_entity(obj) if obj else None
+    return ((element.Name or "").strip() or "A") if element else "A"
+
+
 def get_load_location_objects(
     props: "EditStructuralLoadValues",
 ) -> tuple[Union[bpy.types.Object, None], Union[bpy.types.Object, None]]:
@@ -2265,7 +2271,9 @@ class EditStructuralLoadValues(
     bpy.types.Operator,
     tool.Ifc.Operator,
     StructuralForceInput,
-    get_direction_input("the force's point, from A,", move_load_location, {"SKIP_SAVE"}, prefix="location_"),
+    get_direction_input(
+        "the force's point, from the moment centre,", move_load_location, {"SKIP_SAVE"}, prefix="location_"
+    ),
 ):
     bl_idname = "bim.edit_structural_load_values"
     bl_label = "Edit Structural Load"
@@ -2279,7 +2287,7 @@ class EditStructuralLoadValues(
     # A load just added to be edited, as Add Load at a point does, is removed again if the edit is cancelled.
     remove_on_cancel: bpy.props.BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
     place_from_a: bpy.props.BoolProperty(
-        name="Place From A",
+        name="Place From Moment Centre",
         description="Enter where the force acts, from the moment centre A, as components, an angle or a slope, rather "
         "than the force. It moves the force's point, and every load at it",
         default=False,
@@ -2288,9 +2296,9 @@ class EditStructuralLoadValues(
     location_input_mode: bpy.props.EnumProperty(
         name="Input",
         items=[
-            ("COMPONENTS", "Components", "Δx and Δz, from A to the force's point"),
-            ("ANGLE", "Angle", "Distance and angle, from A to the force's point"),
-            ("SLOPE", "Slope", "Distance and rise over run, from A to the force's point"),
+            ("COMPONENTS", "Components", "Δx and Δz, from the moment centre to the force's point"),
+            ("ANGLE", "Angle", "Distance and angle, from the moment centre to the force's point"),
+            ("SLOPE", "Slope", "Distance and rise over run, from the moment centre to the force's point"),
         ],
         options={"SKIP_SAVE"},
         update=refill_load_location,
@@ -2309,7 +2317,7 @@ class EditStructuralLoadValues(
     )
     location_distance_locked: bpy.props.BoolProperty(
         name="Distance Known",
-        description="If not, a kept moment moves the point along the line from A",
+        description="If not, a kept moment moves the point along the line from the moment centre",
         default=True,
         options={"SKIP_SAVE"},
     )
@@ -2321,20 +2329,20 @@ class EditStructuralLoadValues(
     )
     location_distance: bpy.props.FloatProperty(
         name="Distance",
-        description="From A to the force's point",
+        description="From the moment centre to the force's point",
         subtype="DISTANCE",
         options={"SKIP_SAVE"},
         update=move_load_location,
     )
     location_dx: bpy.props.FloatProperty(
-        name="Δx from A",
+        name="Δx from Moment Centre",
         description="From the moment centre to the force's point, along X, as the report's table measures it",
         subtype="DISTANCE",
         options={"SKIP_SAVE"},
         update=move_load_location,
     )
     location_dz: bpy.props.FloatProperty(
-        name="Δz from A",
+        name="Δz from Moment Centre",
         description="From the moment centre to the force's point, along Z, as the report's table measures it",
         subtype="DISTANCE",
         options={"SKIP_SAVE"},
@@ -2495,7 +2503,8 @@ class EditStructuralLoadValues(
         has_place = bool(get_load_location_objects(self)[0])
         if has_place:
             row = layout.row()
-            row.prop(self, "place_from_a")
+            centre_symbol = get_object_centre_symbol(get_load_location_objects(self)[1])
+            row.prop(self, "place_from_a", text=f"Place From {centre_symbol}")
             if self.place_from_a:
                 self.draw_location_inputs(layout)
                 return
@@ -2523,16 +2532,18 @@ class EditStructuralLoadValues(
     def draw_location_inputs(self, layout: bpy.types.UILayout) -> None:
         """Where the force acts, from A, in the input modes the force is entered in"""
         layout.row().prop(self, "location_input_mode", expand=True)
+        centre_symbol = get_object_centre_symbol(get_load_location_objects(self)[1])
         if self.location_input_mode == "COMPONENTS":
-            draw_with_lock(layout, self, ("location_dx",), "location_x_locked")
-            draw_with_lock(layout, self, ("location_dz",), "location_z_locked")
+            texts = {"location_dx": f"Δx from {centre_symbol}", "location_dz": f"Δz from {centre_symbol}"}
+            draw_with_lock(layout, self, ("location_dx",), "location_x_locked", texts=texts)
+            draw_with_lock(layout, self, ("location_dz",), "location_z_locked", texts=texts)
         else:
             self.draw_location_direction_inputs(layout, "location_angle_locked")
             draw_with_lock(layout, self, ("location_distance",), "location_distance_locked")
             dx, dz = get_load_location_offset(self)
             length_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
             unit = get_project_unit_symbol("LENGTHUNIT", "m")
-            text = f"From A: Δx = {dx / length_scale:.4f}   Δz = {dz / length_scale:.4f} {unit}"
+            text = f"From {centre_symbol}: Δx = {dx / length_scale:.4f}   Δz = {dz / length_scale:.4f} {unit}"
             layout.label(text=text, icon="ORIENTATION_GLOBAL")
         point = tool.Ifc.get_entity(get_load_location_objects(self)[0])
         count = len([r for r in point.AssignedStructuralActivity or [] if r.RelatedStructuralActivity])
@@ -2544,7 +2555,7 @@ class EditStructuralLoadValues(
         elif unlocked:
             activity = tool.Ifc.get().by_id(self.activity)
             if all(tool.Structural.get_resultant_moment(c) is None for c in get_activity_load_groups(activity)):
-                layout.label(text="Found once ΣM_A is kept, in Edit Resultant Moment", icon="INFO")
+                layout.label(text=f"Found once ΣM_{centre_symbol} is kept, in Edit Resultant Moment", icon="INFO")
 
     def cancel(self, context):
         clear_previews(context)
@@ -3126,42 +3137,45 @@ class EditStructuralMomentCentre(
     input_mode: bpy.props.EnumProperty(
         name="Input",
         items=[
-            ("COMPONENTS", "Components", "Δx and Δz, from the point to A"),
-            ("ANGLE", "Angle", "Distance and angle, from the point to A"),
-            ("SLOPE", "Slope", "Distance and rise over run, from the point to A"),
+            ("COMPONENTS", "Components", "Δx and Δz, from the point to the moment centre"),
+            ("ANGLE", "Angle", "Distance and angle, from the point to the moment centre"),
+            ("SLOPE", "Slope", "Distance and rise over run, from the point to the moment centre"),
         ],
         update=refill_moment_inputs,
     )
     distance: bpy.props.FloatProperty(
-        name="Distance", description="From the point to A", subtype="DISTANCE", update=move_moment_centre
+        name="Distance",
+        description="From the point to the moment centre",
+        subtype="DISTANCE",
+        update=move_moment_centre,
     )
     dx: bpy.props.FloatProperty(
-        name="Δx to A",
-        description="From the point to A, along X. The report's table measures the other way, from A to the point",
+        name="Δx to Moment Centre",
+        description="From the point to the moment centre, along X. The report's table measures the other way",
         subtype="DISTANCE",
         update=move_moment_centre,
     )
     dz: bpy.props.FloatProperty(
-        name="Δz to A",
-        description="From the point to A, along Z. The report's table measures the other way, from A to the point",
+        name="Δz to Moment Centre",
+        description="From the point to the moment centre, along Z. The report's table measures the other way",
         subtype="DISTANCE",
         update=move_moment_centre,
     )
     dx_axes: bpy.props.FloatProperty(
-        name="Δx′ to A",
-        description="From the point to A, along the point's own tilted axis x'",
+        name="Δx′ to Moment Centre",
+        description="From the point to the moment centre, along the point's own tilted axis x'",
         subtype="DISTANCE",
         update=move_moment_centre_on_axes,
     )
     dz_axes: bpy.props.FloatProperty(
-        name="Δz′ to A",
-        description="From the point to A, along the point's own tilted axis z'",
+        name="Δz′ to Moment Centre",
+        description="From the point to the moment centre, along the point's own tilted axis z'",
         subtype="DISTANCE",
         update=move_moment_centre_on_axes,
     )
     arm: bpy.props.FloatProperty(
         name="d",
-        description="The moment arm: from A square to the force's line of action. A slides along it",
+        description="The moment arm: from the moment centre square to the force's line of action, which slides along it",
         subtype="DISTANCE",
         min=0.0,
         update=move_moment_arm,
@@ -3169,7 +3183,7 @@ class EditStructuralMomentCentre(
     s: bpy.props.FloatProperty(
         name="s",
         description=(
-            "Along the force's line of action, from its point to the foot of the moment arm. A slides parallel to "
+            "Along the force's line of action, from its point to the foot of the moment arm. The centre slides parallel to "
             "the line of action, keeping d"
         ),
         subtype="DISTANCE",
@@ -3178,7 +3192,7 @@ class EditStructuralMomentCentre(
     )
     phi: bpy.props.FloatProperty(
         name="φ",
-        description="Degrees between r, from the force's point to A, and its line of action. A swings round the point",
+        description="Degrees between r, from the force's point to the centre, and its line of action; the centre swings round the point",
         min=0.0,
         max=90.0,
         update=move_moment_angle,
@@ -3196,7 +3210,7 @@ class EditStructuralMomentCentre(
     )
     alpha: bpy.props.FloatProperty(
         name="α",
-        description="Degrees at A between r and the moment arm, 90 less φ. A swings round the force's point",
+        description="Degrees at the centre between r and the moment arm, 90 less φ; it swings round the force's point",
         min=0.0,
         max=90.0,
         update=move_moment_alpha,
@@ -3240,19 +3254,26 @@ class EditStructuralMomentCentre(
         if len(MOMENT_POINT_ITEMS) > 1:
             layout.prop(self, "point")
         layout.row().prop(self, "input_mode", expand=True)
+        centre_symbol = tool.Structural.get_centre_symbol(tool.Ifc.get().by_id(self.load_case))
         if self.input_mode == "COMPONENTS":
             # Along the point's own axes too, if they are tilted; Δx′ or Δz′ clicked is ready to type.
             focus = {"dx′": "dx_axes", "dz′": "dz_axes"}.get(self.focus, self.focus)
             names = ("dx", "dz", "dx_axes", "dz_axes") if get_moment_tilt(self) else ("dx", "dz")
+            texts = {
+                "dx": f"Δx to {centre_symbol}",
+                "dz": f"Δz to {centre_symbol}",
+                "dx_axes": f"Δx′ to {centre_symbol}",
+                "dz_axes": f"Δz′ to {centre_symbol}",
+            }
             for name in names:
-                draw_with_lock(layout, self, (name,), focus=focus)
+                draw_with_lock(layout, self, (name,), focus=focus, texts=texts)
         else:
             self.draw_direction_inputs(layout)
             draw_with_lock(layout, self, ("distance",), focus=self.focus)
             dx, dz = get_moment_offset(self)
             length_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
             unit = get_project_unit_symbol("LENGTHUNIT", "m")
-            text = f"To A: Δx = {dx / length_scale:.4f}   Δz = {dz / length_scale:.4f} {unit}"
+            text = f"To {centre_symbol}: Δx = {dx / length_scale:.4f}   Δz = {dz / length_scale:.4f} {unit}"
             layout.label(text=text, icon="ORIENTATION_GLOBAL")
         if get_moment_arm_force(self)[0]:
             box = layout.box()
@@ -3273,7 +3294,7 @@ class EditStructuralMomentCentre(
             if sum(unlocked) > 1:
                 box.label(text="Unlock one of d, the angle and r: a kept moment finds one", icon="ERROR")
             elif any(unlocked) and tool.Structural.get_resultant_moment(tool.Ifc.get().by_id(self.load_case)) is None:
-                box.label(text="Found once ΣM_A is kept, in Edit Resultant Moment", icon="INFO")
+                box.label(text=f"Found once ΣM_{centre_symbol} is kept, in Edit Resultant Moment", icon="INFO")
         case = tool.Ifc.get().by_id(self.load_case)
         centre = tool.Structural.get_moment_centre(case)
         kept = tool.Structural.get_resultant_moment(case)
@@ -3281,7 +3302,7 @@ class EditStructuralMomentCentre(
         if moment is not None:
             decimals = tool.Structural.get_structural_props().force_decimals
             unit = f"{get_project_unit_symbol('FORCEUNIT', 'N')}.{get_project_unit_symbol('LENGTHUNIT', 'm')}"
-            text = f"ΣM_A = {moment:+.{decimals}f} {unit}"  # Counter-clockwise positive.
+            text = f"ΣM_{centre_symbol} = {moment:+.{decimals}f} {unit}"  # Counter-clockwise positive.
             if kept is not None:
                 text += "  🔒 kept: the unknown force follows"
             layout.label(text=text, icon="FORCE_VORTEX")
@@ -3375,7 +3396,7 @@ CENTRE_UNKNOWN_WORDS = {
     "SWING": "angle of r (φ, α)",
     "POINT_X": "point along X",
     "POINT_Z": "point along Z",
-    "POINT_REACH": "point along the line from A",
+    "POINT_REACH": "point along the line from the centre",
     "POINT_SWING": "point round A",
 }
 
@@ -3537,15 +3558,16 @@ def solve_resultant_moment(
     kind, activity, error = get_dialog_place_unknown(props)
     if error:
         return {}, error
+    sum_symbol = f"ΣM_{tool.Structural.get_centre_symbol(case)}"
     if kind and not props.moment_locked:
-        return {}, "ΣM_A is unlocked, so found from the forces: lock their positions, or lock ΣM_A to find one"
+        return {}, f"{sum_symbol} is unlocked, so found from the forces: lock their positions, or lock it to find one"
     if props.moment_locked and kind:
         # It moves; no force does. With the dialog's padlocks, not those last kept.
         return {}, solve_case_place(case, get_signed_moment(props), (kind, activity), locks)[2]
     if props.moment_locked:
         return solve_case_moment(case, get_signed_moment(props), locks)
     if not all(locked for lock in locks for locked in lock):
-        return {}, "ΣM_A is unlocked, so found from the forces: lock their values, or lock ΣM_A to find one"
+        return {}, f"{sum_symbol} is unlocked, so found from the forces: lock their values, or lock it to find one"
     return {}, ""
 
 
@@ -3569,18 +3591,18 @@ class EditStructuralResultantMoment(bpy.types.Operator, tool.Ifc.Operator):
     bl_idname = "bim.edit_structural_resultant_moment"
     bl_label = "Edit Resultant Moment"
     bl_description = (
-        "Set the sum of the moments about A, finding the one force magnitude or direction unlocked, and keep it as "
+        "Set the sum of the moments about the moment centre, finding the one force magnitude or direction unlocked, and keep it as "
         "forces change"
     )
     bl_options = {"REGISTER", "UNDO"}
     load_case: bpy.props.IntProperty(options={"HIDDEN", "SKIP_SAVE"})
     moment: bpy.props.FloatProperty(
-        name="ΣM_A",
-        description="The sum of the moments about A, counter-clockwise positive",
+        name="Sum of Moments",
+        description="The sum of the moments about the moment centre, counter-clockwise positive",
         update=update_resultant_moment,
     )
     moment_locked: bpy.props.BoolProperty(
-        name="ΣM_A Known",
+        name="Sum of Moments Known",
         description="Whether the sum of the moments is known, finding a force's value and kept as forces change, or "
         "found from the forces",
         default=True,
@@ -3651,18 +3673,19 @@ class EditStructuralResultantMoment(bpy.types.Operator, tool.Ifc.Operator):
         case = tool.Ifc.get().by_id(self.load_case)
         centre = tool.Structural.get_moment_centre(case)
         unit = f"{get_project_unit_symbol('FORCEUNIT', 'N')}.{get_project_unit_symbol('LENGTHUNIT', 'm')}"
-        layout.label(text=f"About A: {centre.Name or 'Unnamed'}" if centre else "About A", icon="FORCE_VORTEX")
+        centre_symbol = tool.Structural.get_centre_symbol(case)
+        layout.label(text=f"About {centre_symbol}", icon="FORCE_VORTEX")
         row = layout.row(align=True)
         if self.moment_locked:
             values = row.row(align=True)
             values.activate_init = True
-            values.prop(self, "moment", text=f"ΣM_A ({unit})")
+            values.prop(self, "moment", text=f"ΣM_{centre_symbol} ({unit})")
         else:
             # Found from the forces as they are, so shown rather than entered.
             found = tool.Structural.get_moment_about(case, centre) if centre else None
-            text = "ΣM_A: found from the forces"
+            text = f"ΣM_{centre_symbol}: found from the forces"
             if found is not None:
-                text = f"ΣM_A = {found:+.2f} {unit}  (found)"
+                text = f"ΣM_{centre_symbol} = {found:+.2f} {unit}  (found)"
             row.label(text=text)
         row.prop(self, "moment_locked", text="", icon="LOCKED" if self.moment_locked else "UNLOCKED")
         layout.label(text="Forces, and which of their values are known:")
@@ -3683,7 +3706,8 @@ class EditStructuralResultantMoment(bpy.types.Operator, tool.Ifc.Operator):
         if kind and kind not in ("POINT_X", "POINT_Z", "POINT_REACH", "POINT_SWING"):
             number = activities.index(activity) + 1 if activity in activities else 0
             row = layout.row()
-            row.label(text=f"A's place: the {CENTRE_UNKNOWN_WORDS[kind]} of F{number} is found", icon="UNLOCKED")
+            text = f"{centre_symbol}'s place: the {CENTRE_UNKNOWN_WORDS[kind]} of F{number} is found"
+            row.label(text=text, icon="UNLOCKED")
         forces, error = solve_resultant_moment(self)
         if error:
             layout.label(text=error, icon="ERROR")
@@ -3691,7 +3715,8 @@ class EditStructuralResultantMoment(bpy.types.Operator, tool.Ifc.Operator):
         box = layout.box()
         if kind and self.moment_locked:
             name = activity.AppliedLoad.Name or "The force"
-            text = f"{name} moves" if kind in ("POINT_X", "POINT_Z", "POINT_REACH", "POINT_SWING") else "A moves"
+            moving_point = kind in ("POINT_X", "POINT_Z", "POINT_REACH", "POINT_SWING")
+            text = f"{name} moves" if moving_point else f"{centre_symbol} moves"
             box.label(text=f"{text} to make this moment; no force's value changes", icon="FORCE_VORTEX")
             return
         force_unit = get_project_unit_symbol("FORCEUNIT", "N")
@@ -3706,7 +3731,7 @@ class EditStructuralResultantMoment(bpy.types.Operator, tool.Ifc.Operator):
         if not forces and self.moment_locked:
             box.label(text="The forces already make this moment", icon="CHECKMARK")
         elif not forces:
-            box.label(text="No force changes; ΣM_A is no longer kept", icon="INFO")
+            box.label(text=f"No force changes; ΣM_{centre_symbol} is no longer kept", icon="INFO")
 
     def cancel(self, context):
         clear_previews(context)

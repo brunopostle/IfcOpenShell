@@ -331,3 +331,21 @@ class TestKeepingTheDirectionOfAForceOfNone(NewFile):
         assert forces.get(none, forces.get(none.AppliedLoad)) == pytest.approx(
             (10 * math.cos(math.radians(30)), 0.0, -5.0)
         )
+
+
+class TestNamingTheMomentCentre(NewFile):
+    def test_the_centre_is_written_by_its_points_name(self):
+        from bonsai.bim.module.structural.report import get_centre_symbols
+
+        ifc = ifcopenshell.file(schema="IFC4")
+        tool.Ifc.set(ifc)
+        case = ifcopenshell.api.structural.add_structural_load_case(ifc, name="Case")
+        assert tool.Structural.get_centre_symbol(case) == "A"  # No centre: the textbook's A.
+        point = ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcStructuralPointConnection", name="B")
+        tool.Structural.set_moment_centre(case, point)
+        assert tool.Structural.get_centre_symbol(case) == "B"
+        assert get_centre_symbols(case) == ("B", "B")
+        point.Name = "Joint 1"  # Too long for a subscript of letters: set as text.
+        assert get_centre_symbols(case) == (r"\text{Joint 1}", "Joint 1")
+        point.Name = None  # Unnamed: A, as statics texts write a moment centre.
+        assert tool.Structural.get_centre_symbol(case) == "A"

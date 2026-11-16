@@ -652,6 +652,13 @@ class Structural(bonsai.core.tool.Structural):
         return centre if centre and centre.is_a("IfcStructuralPointConnection") else None
 
     @classmethod
+    def get_centre_symbol(cls, load_group: Union[ifcopenshell.entity_instance, None]) -> str:
+        """How a load case's moment centre is written in labels and equations, as ΣM_B: its point's name, or A, as
+        statics texts write a moment centre, if it has none"""
+        centre = cls.get_moment_centre(load_group) if load_group else None
+        return ((centre.Name or "").strip() or "A") if centre else "A"
+
+    @classmethod
     def set_moment_centre(
         cls, load_group: ifcopenshell.entity_instance, centre: Union[ifcopenshell.entity_instance, None]
     ) -> None:
