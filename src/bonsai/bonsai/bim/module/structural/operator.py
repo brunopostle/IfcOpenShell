@@ -1251,6 +1251,43 @@ def get_named_direction(word: Union[str, None]) -> str:
     return QUADRANT_EIGHTHS.get(word, word) if word else "Q1"
 
 
+def get_named_force_direction(load: ifcopenshell.entity_instance) -> Union[tuple[float, float, float], None]:
+    """The direction a single force load's generated name records, as a unit vector in Blender's axes, or None.
+
+    IFC stores a force only as components, so a force of none has no direction left but its name, which a solve
+    that found it zero names in the direction it had, as "0 kN at 30 deg Q8"."""
+    name = load.Name or ""
+    if match := SLOPE_LOAD_NAME.match(name):
+        x, z = tool.Structural.get_in_plane_components(
+            "SLOPE", 1.0, rise=float(match[1]), run=float(match[2]), direction=get_named_direction(match[3])
+        )
+    elif match := ANGLE_LOAD_NAME.match(name):
+        x, z = tool.Structural.get_in_plane_components(
+            "ANGLE", 1.0, angle=float(match[1]), direction=get_named_direction(match[2])
+        )
+    else:
+        return None
+    users = [i for i in tool.Ifc.get().get_inverse(load) if i.is_a("IfcStructuralActivity")]
+    if tool.Structural.get_eighth_on_axes(name):
+        # Named against its point's own axes.
+        tilt = get_common_tilt([c[0].RelatingElement for u in users if (c := u.AssignedToStructuralItem)])
+        if tilt is None:
+            return None
+        x, z = tool.Structural.from_axes(x, z, tilt)
+    if any(tool.Structural.get_push(u) for u in users):
+        x, z = -x, -z  # A push is named by the side it arrives from.
+    length = math.hypot(x, z)
+    return (x / length, 0.0, z / length) if length else None
+
+
+def get_solving_force(load: ifcopenshell.entity_instance, force: tuple, locks: tuple[bool, bool]) -> tuple:
+    """The force to solve with: as it is, unless it is none and its magnitude is to be found, when the direction
+    its name records stands in for it, as a solve finds a magnitude along a direction"""
+    if not locks[0] and not any(force) and (direction := get_named_force_direction(load)):
+        return direction
+    return force
+
+
 def get_load_category(load: ifcopenshell.entity_instance) -> Union[str, None]:
     """Get the kind of structural item a load applies to, if it is a force the load dialogs support."""
     return next((c for c, (load_class, *_) in APPLY_LOAD_CLASSES.items() if load.is_a(load_class)), None)
@@ -1570,8 +1607,11 @@ def get_resolved_forces(
         for a in tool.Structural.get_chain_activities(item, load_case)
         if a.AppliedLoad and a.AppliedLoad.is_a("IfcStructuralLoadSingleForce") and a.GlobalOrLocal != "LOCAL_COORDS"
     ]
-    values = [(forces or {}).get(a.id(), get_force(a.AppliedLoad)) for a in activities]
     lock_values = [(locks or {}).get(a.id(), tool.Structural.get_locks(a)) for a in activities]
+    values = [
+        get_solving_force(a.AppliedLoad, (forces or {}).get(a.id(), get_force(a.AppliedLoad)), lock)
+        for a, lock in zip(activities, lock_values)
+    ]
     solved, _, error = solve_factored(
         activities,
         values,
@@ -1610,6 +1650,12 @@ def write_forces(forces: dict[ifcopenshell.entity_instance, tuple]) -> None:
     ifc_file = tool.Ifc.get()
     unit = get_load_unit_symbol("IfcStructuralPointConnection")
     for load, force in forces.items():
+        old = get_force(load)
+        direction = None
+        if math.hypot(*force) <= 1e-9 * max(1.0, math.hypot(*old)):
+            # Found to be none: written as none, and named in the direction it had, which only its name can keep.
+            force = (0.0, 0.0, 0.0)
+            direction = old if any(old) else get_named_force_direction(load)
         attributes = get_force_attributes(load, force)
         if DEFAULT_LOAD_NAME.match(load.Name or ""):
             # Entered against the point's own axes, as a primed eighth records, it is named against them still.
@@ -1620,7 +1666,10 @@ def write_forces(forces: dict[ifcopenshell.entity_instance, tuple]) -> None:
             # On the boundary of two eighths, as at 45 degrees, it keeps the one it was named in.
             named = re.search(r" (Q[1-8])(?:′| \(x′z′\))?$", load.Name or "")
             push = any(tool.Structural.get_push(u) for u in users)
-            attributes["Name"] = get_force_name(force, unit, tilt, named[1] if named else None, push)
+            if direction:
+                attributes["Name"] = get_force_name(direction, unit, tilt, named[1] if named else None, push, 0.0)
+            else:
+                attributes["Name"] = get_force_name(force, unit, tilt, named[1] if named else None, push)
         ifcopenshell.api.structural.edit_structural_load(ifc_file, structural_load=load, attributes=attributes)
 
 
@@ -1673,7 +1722,7 @@ def solve_resultant(
         resultant = (x, 0.0, z)
     forces, resultant, error = solve_factored(
         activities[: len(loads)],
-        [get_force(load) for load in loads],
+        [get_solving_force(load, get_force(load), lock) for load, lock in zip(loads, locks)],
         locks,
         resultant,
         (props.magnitude_locked, props.direction_locked),
@@ -1710,12 +1759,15 @@ def get_force_name(
     tilt: Union[float, None] = None,
     eighth: Union[str, None] = None,
     push: bool = False,
+    magnitude: Union[float, None] = None,
 ) -> str:
     """A generated name for a force, by its angle from the nearest axis if it lies in the X-Z plane.
 
     :param tilt: The tilt of the point's own axes, to name it against them, its eighth primed, as entered so.
     :param eighth: The eighth to name it in if it lies on that eighth's boundary, as it was named before.
     :param push: Whether it pushes, to name it by the side it arrives from.
+    :param magnitude: The magnitude to name, if not the force's own: 0 for a force of none, named in the
+        direction it had, given as the force.
     """
     x, y, z = force
     if y:
@@ -1726,7 +1778,8 @@ def get_force_name(
     if tilt:
         x, z = tool.Structural.to_axes(x, z, tilt)
     eighth, angle, _, _ = tool.Structural.get_eighth(x, z, eighth)
-    return f"{math.hypot(x, z):g} {unit} at {angle:g} deg{get_direction_suffix(eighth, bool(tilt))}"
+    size = math.hypot(x, z) if magnitude is None else magnitude
+    return f"{size:g} {unit} at {angle:g} deg{get_direction_suffix(eighth, bool(tilt))}"
 
 
 def clear_previews(context: bpy.types.Context) -> None:
