@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from time import time
 from typing import (
     TYPE_CHECKING,
@@ -3931,6 +3931,20 @@ class OverrideMoveMacro(bpy.types.Macro):
     bl_label = "IFC Move Aggregate"
     bl_description = "Move selected items.\n\nAutomatically select all parts of an aggregate/nesting to move."
     bl_options = {"REGISTER", "UNDO"}
+
+
+class OverrideMoveFinish(bpy.types.Operator):
+    bl_idname = "bim.override_move_finish"
+    bl_label = "IFC Move Finish"
+    bl_description = "Run what other modules do once a move is confirmed, in the move's undo step"
+    bl_options = {"INTERNAL"}
+    # Functions of the context, run in order after IFC Move Aggregate is confirmed, not after it is cancelled.
+    callbacks: list[Callable[[bpy.types.Context], None]] = []
+
+    def execute(self, context):
+        for callback in OverrideMoveFinish.callbacks:
+            callback(context)
+        return {"FINISHED"}
 
 
 class OverrideMoveSelect(bpy.types.Operator):

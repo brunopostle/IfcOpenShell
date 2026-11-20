@@ -18,6 +18,8 @@
 
 import bpy
 
+from bonsai.bim.module.geometry.operator import OverrideMoveFinish
+
 from . import operator, prop, ui, workspace
 
 classes = (
@@ -125,9 +127,13 @@ def register():
         bpy.utils.register_tool(workspace.StructuralTool, after={"bim.spatial_tool"}, separator=False, group=False)
     bpy.types.Scene.BIMStructuralProperties = bpy.props.PointerProperty(type=prop.BIMStructuralProperties)
     bpy.types.Object.BIMStructuralProperties = bpy.props.PointerProperty(type=prop.BIMObjectStructuralProperties)
+    # Kept moments' unknowns are written once a move is confirmed, in its undo step.
+    OverrideMoveFinish.callbacks.append(operator.keep_moments_after_move)
 
 
 def unregister():
+    if operator.keep_moments_after_move in OverrideMoveFinish.callbacks:
+        OverrideMoveFinish.callbacks.remove(operator.keep_moments_after_move)
     if not bpy.app.background:
         bpy.utils.unregister_tool(workspace.StructuralTool)
     del bpy.types.Scene.BIMStructuralProperties

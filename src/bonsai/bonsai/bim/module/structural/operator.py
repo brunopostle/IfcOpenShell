@@ -43,7 +43,7 @@ from bonsai.bim.module.structural.data import (
     StructuralAnalysisModelsData,
     StructuralLoadCasesData,
 )
-from bonsai.bim.module.structural.decorator import LoadsDecorator
+from bonsai.bim.module.structural.decorator import UNKEPT_ITEMS, LoadsDecorator
 from bonsai.bim.module.structural.load_decoration_data import ShaderInfo
 
 # The eighths of a circle, counter-clockwise from +X, that directions are given in.
@@ -3499,6 +3499,33 @@ def get_kept_moment_preview(items: list[ifcopenshell.entity_instance]) -> dict[i
     return preview
 
 
+def is_kept_moment_unkept(items: list[ifcopenshell.entity_instance]) -> bool:
+    """Whether a kept moment that moving these structural items changes solves, where they are now, to an unknown
+    other than the one written: a force, or a place, as after a move that did not end through IFC Move"""
+    unit_scale = ifcopenshell.util.unit.calculate_unit_scale(tool.Ifc.get())
+    for case in get_kept_moment_cases(items):
+        moment = tool.Structural.get_resultant_moment(case)
+        if tool.Structural.get_moment_centre_unknown(case)[0]:
+            obj, place, error = solve_case_place(case, moment)
+            if not error and obj and (Vector(place) * unit_scale - get_vertex_location(obj)).length > 1e-9:
+                return True
+            continue
+        forces, error = solve_case_moment(case, moment)
+        if not error and any(
+            not np.allclose(force, get_force(load), rtol=1e-9, atol=1e-9) for load, force in forces.items()
+        ):
+            return True
+    return False
+
+
+def keep_moments_after_move(context: bpy.types.Context) -> None:
+    """Write the unknowns of kept moments that the structural items just moved change, once the move is confirmed,
+    in its undo step: the solve drawn while they moved"""
+    items = [e for o in context.selected_objects if (e := tool.Ifc.get_entity(o)) and e.is_a("IfcStructuralItem")]
+    if items and get_kept_moment_cases(items):
+        bpy.ops.bim.keep_structural_moments(items=",".join(str(item.id()) for item in items))
+
+
 def keep_resultant_moments(activities: list[ifcopenshell.entity_instance]) -> None:
     """Solve again the unknown of each load case these applied loads are in that keeps a sum of moments, as a
     locked resultant is kept, after a force or the moment centre changes: a force's value, or a place"""
@@ -3797,6 +3824,8 @@ class KeepStructuralMoments(bpy.types.Operator, tool.Ifc.Operator):
                 continue  # Removed since it moved.
         ShaderInfo.preview = {}  # The forces solved while it moved are written now.
         keep_resultant_moments(get_moved_activities(items))
+        UNKEPT_ITEMS.difference_update(item.id() for item in items)
+        LoadsDecorator.redraw_properties()
         redraw_loads(context)
         return {"FINISHED"}
 

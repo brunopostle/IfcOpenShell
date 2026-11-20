@@ -349,3 +349,91 @@ class TestNamingTheMomentCentre(NewFile):
         assert get_centre_symbols(case) == (r"\text{Joint 1}", "Joint 1")
         point.Name = None  # Unnamed: A, as statics texts write a moment centre.
         assert tool.Structural.get_centre_symbol(case) == "A"
+
+
+class TestKeepingMomentsAfterMoves(NewFile):
+    """A kept sum of moments about A, with B's downward force to find: moving B along X changes its arm, so the
+    force solves again to keep the sum, written once a move through IFC Move is confirmed"""
+
+    def add_point(self, ifc, name, x):
+        point = ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcStructuralPointConnection", name=name)
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
+        obj = bpy.data.objects.new(name, mesh)
+        obj.location = (x, 0.0, 0.0)
+        bpy.context.scene.collection.objects.link(obj)
+        tool.Ifc.link(point, obj)
+        return point, obj
+
+    def setup_case(self):
+        ifc = ifcopenshell.file(schema="IFC4")
+        tool.Ifc.set(ifc)
+        ifcopenshell.api.root.create_entity(ifc, ifc_class="IfcProject")
+        case = ifcopenshell.api.structural.add_structural_load_case(ifc, name="Case")
+        centre, _ = self.add_point(ifc, "A", 0.0)
+        point, obj = self.add_point(ifc, "B", 2.0)
+        bpy.context.view_layer.update()
+        load = ifcopenshell.api.structural.add_structural_load(ifc, name="Z -10 N", ifc_class="IfcStructuralLoadSingleForce")
+        load.ForceX, load.ForceY, load.ForceZ = 0.0, 0.0, -10.0
+        activity = ifcopenshell.api.structural.add_structural_activity(
+            ifc, applied_load=load, structural_member=point, ifc_class="IfcStructuralPointAction"
+        )
+        ifcopenshell.api.group.assign_group(ifc, products=[activity], group=case)
+        tool.Structural.set_locks(activity, False, True)  # Its magnitude is the unknown.
+        tool.Structural.set_moment_centre(case, centre)
+        from bonsai.bim.module.structural.operator import get_case_moment_forces
+
+        _, arms, forces = get_case_moment_forces(case)
+        tool.Structural.set_resultant_moment(case, float(arms[0][0] * forces[0][2] - arms[0][2] * forces[0][0]))
+        return point, obj, load
+
+    def move(self, obj, x):
+        obj.location.x = x
+        bpy.context.view_layer.update()
+
+    def report_move(self, obj):
+        """As the depsgraph reports a move while loads are shown"""
+        from bonsai.bim.module.structural.decorator import update_loads_after_moves
+
+        update = SimpleNamespace(is_updated_transform=True, id=obj)
+        with mock.patch.object(LoadsDecorator, "update"):
+            update_loads_after_moves(bpy.context.scene, SimpleNamespace(updates=[update]))
+
+    def test_the_kept_moment_is_written_after_a_move_is_confirmed(self):
+        from bonsai.bim.module.geometry.operator import OverrideMoveFinish
+        from bonsai.bim.module.structural.operator import keep_moments_after_move
+
+        assert keep_moments_after_move in OverrideMoveFinish.callbacks
+        point, obj, load = self.setup_case()
+        self.move(obj, 4.0)
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.ops.bim.override_move_finish()  # The step IFC Move runs once a move is confirmed.
+        assert tool.Structural.get_force(load) == pytest.approx((0.0, 0.0, -5.0))  # Twice the arm, half the force.
+
+    def test_a_move_by_other_means_is_kept_on_request(self):
+        from bonsai.bim.module.structural.decorator import UNKEPT_ITEMS
+        from bonsai.bim.module.structural.load_decoration_data import ShaderInfo
+
+        point, obj, load = self.setup_case()
+        self.move(obj, 4.0)  # As the gizmo or a typed location moves it: no IFC Move to confirm.
+        self.report_move(obj)
+        assert UNKEPT_ITEMS == {point.id()}
+        assert tool.Structural.get_force(load) == pytest.approx((0.0, 0.0, -10.0))  # Not written yet,
+        assert ShaderInfo.preview[load.id()]["ForceZ"] == pytest.approx(-5.0)  # but drawn as it solves.
+        bpy.ops.bim.keep_structural_moments(items=str(point.id()))
+        assert tool.Structural.get_force(load) == pytest.approx((0.0, 0.0, -5.0))
+        assert not UNKEPT_ITEMS
+
+    def test_moving_back_is_kept_without_writing(self):
+        from bonsai.bim.module.structural.decorator import UNKEPT_ITEMS
+        from bonsai.bim.module.structural.load_decoration_data import ShaderInfo
+
+        point, obj, load = self.setup_case()
+        self.move(obj, 4.0)
+        self.report_move(obj)
+        self.move(obj, 2.0)  # As an undo or a cancelled move puts it back.
+        self.report_move(obj)
+        assert not UNKEPT_ITEMS
+        assert not ShaderInfo.preview
+        assert tool.Structural.get_force(load) == pytest.approx((0.0, 0.0, -10.0))
