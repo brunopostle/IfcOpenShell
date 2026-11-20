@@ -58,6 +58,7 @@ classes = (
     operator.OverrideMeshSeparate,
     operator.OverrideModeSetEdit,
     operator.OverrideModeSetObject,
+    operator.OverrideMoveFinish,
     operator.OverrideMoveSelect,
     operator.OverrideMoveMacro,
     operator.OverrideOriginSet,
@@ -133,6 +134,7 @@ def register():
     operator.DuplicateMoveLinkedAggregateMacro.define("TRANSFORM_OT_translate")
     operator.OverrideMoveMacro.define("BIM_OT_override_move_select")
     operator.OverrideMoveMacro.define("TRANSFORM_OT_translate")
+    operator.OverrideMoveMacro.define("BIM_OT_override_move_finish")
 
     bpy.types.Object.BIMGeometryProperties = bpy.props.PointerProperty(type=prop.BIMObjectGeometryProperties)
     bpy.types.Scene.BIMGeometryProperties = bpy.props.PointerProperty(type=prop.BIMGeometryProperties)

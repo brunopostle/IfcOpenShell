@@ -27,6 +27,7 @@ from bpy.types import Panel, UIList
 import bonsai.bim.helper
 import bonsai.tool as tool
 from bonsai.bim.helper import draw_attributes, prop_with_search
+from bonsai.bim.module.structural import decorator
 from bonsai.bim.module.structural.data import (
     BoundaryConditionsData,
     ConnectedStructuralMembersData,
@@ -846,6 +847,12 @@ class BIM_PT_show_structural_activities(Panel):
             row.operator("bim.set_structural_moment_centre", text="", icon="X").clear = True
         else:
             row.operator("bim.set_structural_moment_centre", icon="FORCE_VORTEX")
+        if decorator.UNKEPT_ITEMS:
+            # Moved other than by IFC Move: the kept moments drawn are not yet written, as a placement's star says.
+            row = self.layout.row(align=True)
+            row.operator("bim.keep_structural_moments", text="Keep Moments*", icon="FILE_REFRESH").items = ",".join(
+                str(i) for i in decorator.UNKEPT_ITEMS
+            )
         row = self.layout.row(align=True)
         row.prop(self.props, "force_display")
         row = self.layout.row(align=True)
