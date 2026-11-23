@@ -374,7 +374,9 @@ class TestKeepingMomentsAfterMoves(NewFile):
         centre, _ = self.add_point(ifc, "A", 0.0)
         point, obj = self.add_point(ifc, "B", 2.0)
         bpy.context.view_layer.update()
-        load = ifcopenshell.api.structural.add_structural_load(ifc, name="Z -10 N", ifc_class="IfcStructuralLoadSingleForce")
+        load = ifcopenshell.api.structural.add_structural_load(
+            ifc, name="Z -10 N", ifc_class="IfcStructuralLoadSingleForce"
+        )
         load.ForceX, load.ForceY, load.ForceZ = 0.0, 0.0, -10.0
         activity = ifcopenshell.api.structural.add_structural_activity(
             ifc, applied_load=load, structural_member=point, ifc_class="IfcStructuralPointAction"
