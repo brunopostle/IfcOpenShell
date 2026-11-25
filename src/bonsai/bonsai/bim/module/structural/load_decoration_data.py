@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
+import math
 import re
 from collections.abc import Iterable
 from math import sin
@@ -130,6 +131,45 @@ def segments_cross(p1: Iterable, p2: Iterable, q1: Iterable, q2: Iterable) -> bo
         d == 0 and min(a[0], b[0]) <= c[0] <= max(a[0], b[0]) and min(a[1], b[1]) <= c[1] <= max(a[1], b[1])
     )
     return on(q1, q2, p1, d1) or on(q1, q2, p2, d2) or on(p1, p2, q1, d3) or on(p1, p2, q2, d4)
+class ScreenGrid:
+    """Label boxes and lines on screen, kept by the cells of a grid they touch, so that a label being placed is
+    tested only against those near it, as this runs on every redraw with as many labels as loads shown"""
+
+    def __init__(self, cell: float = 64.0) -> None:
+        self.cell = cell
+        self.boxes: dict[tuple[int, int], list[tuple[float, float, float, float]]] = {}
+        self.segments: dict[tuple[int, int], list[tuple[Iterable, Iterable]]] = {}
+
+    def get_cells(self, left: float, low: float, right: float, high: float) -> Iterable[tuple[int, int]]:
+        c = self.cell
+        for i in range(math.floor(left / c), math.floor(right / c) + 1):
+            for j in range(math.floor(low / c), math.floor(high / c) + 1):
+                yield i, j
+
+    def add_box(self, left: float, low: float, width: float, height: float) -> None:
+        for cell in self.get_cells(left, low, left + width, low + height):
+            self.boxes.setdefault(cell, []).append((left, low, width, height))
+
+    def add_segment(self, start: Iterable, end: Iterable) -> None:
+        (x1, y1), (x2, y2) = start, end
+        for cell in self.get_cells(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)):
+            self.segments.setdefault(cell, []).append((start, end))
+
+    def overlaps_box(self, left: float, low: float, width: float, height: float, margin: float = 0.0) -> bool:
+        """Whether a box comes within margin of a box added"""
+        for cell in self.get_cells(left - margin, low - margin, left + width + margin, low + height + margin):
+            for bl, bb, bw, bh in self.boxes.get(cell, ()):
+                if left < bl + bw + margin and bl < left + width + margin and low < bb + bh + margin:
+                    if bb < low + height + margin:
+                        return True
+        return False
+
+    def crosses_segment(self, left: float, low: float, width: float, height: float) -> bool:
+        """Whether a box touches any line added"""
+        return any(
+            box_crosses_segments(left, low, width, height, self.segments.get(cell, ()))
+            for cell in self.get_cells(left, low, left + width, low + height)
+        )
 
 
 class ShaderInfo:
@@ -188,8 +228,9 @@ class ShaderInfo:
         self.get_point_loads()
         self.get_planar_loads()
         self.get_moments()
+        self.get_temperature_loads()
         self.tag_new_entries(None)
-        if len(self.info):
+        if len(self.info) or len(self.text_info):
             self.is_empty = False
 
     def get_force_units(self) -> None:
@@ -199,7 +240,15 @@ class ShaderInfo:
         ifc_file = tool.Ifc.get()
         project_units = {
             t: ifcunit.get_project_unit(ifc_file, t)
-            for t in ("FORCEUNIT", "LENGTHUNIT", "TORQUEUNIT", "LINEARFORCEUNIT", "LINEARMOMENTUNIT", "PLANARFORCEUNIT")
+            for t in (
+                "FORCEUNIT",
+                "LENGTHUNIT",
+                "TORQUEUNIT",
+                "LINEARFORCEUNIT",
+                "LINEARMOMENTUNIT",
+                "PLANARFORCEUNIT",
+                "THERMODYNAMICTEMPERATUREUNIT",
+            )
         }
         linear_force_units = [u for u in [project_units["LINEARFORCEUNIT"]] if u]
         linear_moment_units = [u for u in [project_units["LINEARMOMENTUNIT"]] if u]
@@ -243,6 +292,8 @@ class ShaderInfo:
             if e.Unit.UnitType == "AREAUNIT":
                 second = ifcunit.get_unit_symbol(e.Unit)
         self.planar_force_unit = first + "/" + second
+        temp_unit = project_units["THERMODYNAMICTEMPERATUREUNIT"]
+        self.temperature_unit = ifcunit.get_unit_symbol(temp_unit) if temp_unit else "K"
 
     def get_structural_elements_and_activities(self) -> None:
         """fills self.point_members, self.curve_members and self.surface_members dictionaries"""
@@ -2281,6 +2332,107 @@ class ShaderInfo:
                     if uniform[0] == "maxload":
                         uniform[1] = maxforce
                         break
+
+    def get_temperature_loads(self) -> None:
+        props = tool.Structural.get_structural_props()
+        decimals = getattr(props, "force_decimals", 2)
+        unit = getattr(self, "temperature_unit", "K")
+
+        def _sum_temperature(activity_list):
+            dt_const, dt_y, dt_z = 0.0, 0.0, 0.0
+            found = False
+            for activity, factor in activity_list:
+                load = getattr(activity, "AppliedLoad", None)
+                if not load or not load.is_a("IfcStructuralLoadTemperature"):
+                    continue
+                found = True
+                dt_const += (getattr(load, "DeltaTConstant", None) or 0.0) * factor
+                dt_y += (getattr(load, "DeltaTY", None) or 0.0) * factor
+                dt_z += (getattr(load, "DeltaTZ", None) or 0.0) * factor
+            return found, dt_const, dt_y, dt_z
+
+        def _format_temp_label(dt_const: float, dt_y: float, dt_z: float) -> str:
+            parts = []
+            if dt_const or (not dt_y and not dt_z):
+                parts.append(f"ΔT={dt_const:+.{decimals}f} {unit}")
+            if dt_y:
+                parts.append(f"ΔTy={dt_y:+.{decimals}f} {unit}")
+            if dt_z:
+                parts.append(f"ΔTz={dt_z:+.{decimals}f} {unit}")
+            return ", ".join(parts)
+
+        def _temp_color(dt_const: float) -> tuple[float, float, float, float]:
+            if dt_const < 0:
+                return (0.1, 0.6, 1.0, 1.0)
+            return (1.0, 0.4, 0.1, 1.0)
+
+        for value in self.curve_members.values():
+            member = value["member"]
+            self.tag_new_entries(tool.Ifc.get_object(member))
+            found, dt_const, dt_y, dt_z = _sum_temperature(value["activities"])
+            if not found or not any((dt_const, dt_y, dt_z)):
+                continue
+            blender_object = tool.Ifc.get_object_by_identifier(getattr(member, "GlobalId", None))
+            if not blender_object or not blender_object.data or len(blender_object.data.vertices) < 2:
+                continue
+            start_co = blender_object.matrix_world @ blender_object.data.vertices[0].co
+            end_co = blender_object.matrix_world @ blender_object.data.vertices[1].co
+            member_length = (end_co - start_co).length
+            rotation = self.get_curve_member_rotation(member)
+            z_dir = Vector(rotation[:, 2]).normalized() if rotation is not None else Vector((0.0, 0.0, 1.0))
+            offset = z_dir * 0.15
+            color = _temp_color(dt_const)
+            self.add_dashed_line(
+                np.array(start_co + offset),
+                np.array(end_co + offset),
+                max(member_length, 1.0),
+                color,
+                dashed=True,
+            )
+            midpoint = (start_co + end_co) / 2.0 + offset
+            self.text_info.append(
+                {
+                    "position": midpoint,
+                    "text": _format_temp_label(dt_const, dt_y, dt_z),
+                    "color": color,
+                }
+            )
+
+        for value in self.surface_members.values():
+            member = value["member"]
+            self.tag_new_entries(tool.Ifc.get_object(member))
+            found, dt_const, dt_y, dt_z = _sum_temperature(value["activities"])
+            if not found or not any((dt_const, dt_y, dt_z)):
+                continue
+            blender_object = tool.Ifc.get_object_by_identifier(getattr(member, "GlobalId", None))
+            if not blender_object or not blender_object.data or not len(blender_object.data.vertices):
+                continue
+            verts = [blender_object.matrix_world @ v.co for v in blender_object.data.vertices]
+            centroid = sum(verts, Vector((0.0, 0.0, 0.0))) / len(verts)
+            self.text_info.append(
+                {
+                    "position": centroid,
+                    "text": _format_temp_label(dt_const, dt_y, dt_z),
+                    "color": _temp_color(dt_const),
+                }
+            )
+
+        for value in self.point_members.values():
+            member = value["member"]
+            self.tag_new_entries(tool.Ifc.get_object(member))
+            found, dt_const, dt_y, dt_z = _sum_temperature(value["activities"])
+            if not found or not any((dt_const, dt_y, dt_z)):
+                continue
+            blender_object = tool.Ifc.get_object_by_identifier(getattr(member, "GlobalId", None))
+            if not blender_object:
+                continue
+            self.text_info.append(
+                {
+                    "position": blender_object.matrix_world.translation.copy(),
+                    "text": _format_temp_label(dt_const, dt_y, dt_z),
+                    "color": _temp_color(dt_const),
+                }
+            )
 
     def resolve_linear_forces(
         self, linear_loads: dict[str, LoadByDirection]

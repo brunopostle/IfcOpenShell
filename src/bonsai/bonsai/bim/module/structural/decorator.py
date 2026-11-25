@@ -30,7 +30,7 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
 import bonsai.tool as tool
-from bonsai.bim.module.structural.load_decoration_data import ShaderInfo, box_crosses_segments, get_plain_symbol
+from bonsai.bim.module.structural.load_decoration_data import ScreenGrid, ShaderInfo, get_plain_symbol
 
 # Structural items moved by other means than IFC Move, such as the gizmo or typed values, whose kept moments solve,
 # where they are now, to unknowns other than those written: Keep Moments writes them. By id.
@@ -279,9 +279,8 @@ class LoadsDecorator(tool.Blender.ViewportDecorator):
 
         self.depth_array = n / (f - (f - n) * depth_array) * (f - n)
 
-        placed: list[tuple[float, float, float, float]] = []
+        placed = self.get_screen_segments(context)  # Labels' boxes are added as they are drawn.
         drawn: dict[int, tuple[float, float, float]] = {}  # Where each label went, for one following it.
-        segments = self.get_screen_segments(context)
         boxes = self.label_boxes[context.region.as_pointer()] = []
         # Each item's diagram size, its longest arrow, so that labels keep to it as in a report's diagram.
         sizes: dict[str, float] = {}
@@ -312,9 +311,9 @@ class LoadsDecorator(tool.Blender.ViewportDecorator):
                     # On the same line, just after the value it goes with, as a moment its force's.
                     fx, fy, fw = drawn[id(follows)]
                     x, y = fx + fw + 12, fy
-                    placed.append((x, y, *blf.dimensions(font_id, text)))
+                    placed.add_box(x, y, *blf.dimensions(font_id, text))
                 elif (away := info.get("away")) is not None:
-                    x, y = self.place_beside(info["position"], away, x, y, text, context, placed, segments)
+                    x, y = self.place_beside(info["position"], away, x, y, text, context, placed)
                 drawn[id(info)] = (x, y, blf.dimensions(font_id, text)[0])
                 blf.position(font_id, x, y, text_position[2])
                 if index is not None:
@@ -361,15 +360,13 @@ class LoadsDecorator(tool.Blender.ViewportDecorator):
         y: float,
         text: str,
         context: bpy.types.Context,
-        placed: Union[list[tuple[float, float, float, float]], None] = None,
-        segments: Iterable[tuple[Iterable, Iterable]] = (),
+        placed: Union[ScreenGrid, None] = None,
     ) -> tuple[float, float]:
         """Offset a label from its anchor towards away, so that it sits beside its line rather than on it.
 
-        :param placed: The boxes of labels already drawn. The label moves further away until it clears them,
-            and its box is added.
-        :param segments: Arrows and lines on screen it keeps off too, or, if it cannot within reach, the
-            nearest place clear of the other labels.
+        :param placed: The boxes of labels already drawn, and the arrows and lines on screen. The label moves
+            until it clears them, or, if it cannot clear the lines within reach, to the nearest place clear of the
+            other labels, and its box is added.
         """
         start = location_3d_to_region_2d(context.region, context.region_data, Vector(position))
         end = location_3d_to_region_2d(context.region, context.region_data, Vector(position) + Vector(away))
@@ -400,47 +397,32 @@ class LoadsDecorator(tool.Blender.ViewportDecorator):
             )
             for t in turns
         ]
-        # This runs on every redraw, so only lines within reach are tested, and a label that finds no clear place
-        # within a number of tries keeps the nearest one clear of the other labels.
+        # This runs on every redraw, so a label that finds no clear place within a number of tries keeps the nearest
+        # one clear of the other labels.
         steps, tries = 60, 60
-        reach = 12 + 4 * steps + width + height
-        nearby = [
-            s
-            for s in segments
-            if max(s[0][0], s[1][0]) > x - reach
-            and min(s[0][0], s[1][0]) < x + reach
-            and max(s[0][1], s[1][1]) > y - reach
-            and min(s[0][1], s[1][1]) < y + reach
-        ]
         chosen = fallback = None  # Clear of all; clear of the labels only, if lines cannot be cleared too.
         for step in range(steps):
             for towards in candidates:
                 bx, by = get_box(towards, 12 + 4 * step)
-                if any(
-                    bx < px + pw + margin
-                    and px < bx + width + margin
-                    and by < py + ph + margin
-                    and py < by + height + margin
-                    for px, py, pw, ph in placed
-                ):
+                if placed.overlaps_box(bx, by, width, height, margin):
                     continue
                 fallback = fallback or (bx, by)
                 tries -= 1
-                if tries < 0 or not box_crosses_segments(
-                    bx - margin, by - margin, width + 2 * margin, height + 2 * margin, nearby
+                if tries < 0 or not placed.crosses_segment(
+                    bx - margin, by - margin, width + 2 * margin, height + 2 * margin
                 ):
                     chosen = (bx, by) if tries >= 0 else fallback
                     break
             if chosen:
                 break
         x, y = chosen or fallback or get_box(direction, 12)
-        placed.append((x, y, width, height))
+        placed.add_box(x, y, width, height)
         return x, y
 
-    def get_screen_segments(self, context: bpy.types.Context) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    def get_screen_segments(self, context: bpy.types.Context) -> ScreenGrid:
         """The visible arrows and solid lines, as arcs and slope triangles, on screen, for labels to keep off.
         Dashed guides, as parallelogram sides and reference axes, may be crossed."""
-        segments = []
+        segments = ScreenGrid()
         for info in self.shader_info:
             if not (primitive := info.get("primitive")) or not self.is_visible(info):
                 continue
@@ -452,7 +434,7 @@ class LoadsDecorator(tool.Blender.ViewportDecorator):
                 continue
             points = [location_3d_to_region_2d(context.region, context.region_data, Vector(p)) for p in ends]
             if None not in points:
-                segments.append(tuple((p.x, p.y) for p in points))
+                segments.add_segment(*((p.x, p.y) for p in points))
         return segments
 
     def location_3d_to_region_2d(self, coord: Iterable, context: bpy.types.Context) -> Union[Vector, None]:
